@@ -1,6 +1,6 @@
 {
   "name": "media-downloader",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A desktop app to download videos and audio from the web, powered by yt-dlp and ffmpeg.",
   "main": "./out/main/index.js",
   "author": "Abuel Bayangan",
