@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YTDL Helper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <header class="header">
+      <img src="icon.png" alt="YTDL Logo" class="logo">
+      <div class="header-text">
+        <h1>YTDL Desktop Helper</h1>
+        <span class="version">v1.1.0</span>
+      </div>
+    </header>
+
+    <div class="divider"></div>
+
+    <main class="content">
+      <div id="status-card" class="status-card disconnected">
+        <span class="pulse-dot"></span>
+        <span id="status-text">Disconnected</span>
+      </div>
+
+      <div class="action-area">
+        <div class="format-toggle" id="format-toggle">
+          <button type="button" class="fmt-btn active" data-format="best">Video</button>
+          <button type="button" class="fmt-btn" data-format="mp3">Audio</button>
+        </div>
+        <button id="download-tab-btn" class="download-btn" disabled>Download This Page</button>
+        <p id="action-result" class="action-result"></p>
+      </div>
+
+      <p class="description">
+        Sends the current tab to your YTDL Desktop App. On supported players (like Kwik.cx) a one-click button is injected directly into the page.
+      </p>
+
+      <div class="features-list">
+        <div class="feature-item">
+          <span class="icon">⚡</span>
+          <span>Single-click download injection</span>
+        </div>
+        <div class="feature-item">
+          <span class="icon">🔓</span>
+          <span>Bypass website anti-bot systems</span>
+        </div>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <span>Status: <strong id="server-address">http://127.0.0.1:30123</strong></span>
+    </footer>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
