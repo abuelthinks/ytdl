@@ -193,6 +193,19 @@ export default function DownloadQueue({
                             ))}
                           </select>
                         )}
+
+                        {item.fileSize && (
+                          <span className="inline-flex items-center px-2.5 py-1 bg-apple-gray-bg-light/60 dark:bg-apple-gray-bg-dark/60 border border-apple-border-light dark:border-apple-border-dark rounded-lg text-[10px] font-semibold text-apple-text-secondary-light dark:text-apple-text-secondary-dark">
+                            {item.fileSize === 'Calculating size...' ? (
+                              <span className="flex items-center gap-1.5 animate-pulse">
+                                <span className="w-1.5 h-1.5 bg-apple-blue rounded-full animate-ping"></span>
+                                Calculating size...
+                              </span>
+                            ) : (
+                              item.fileSize
+                            )}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -308,7 +321,7 @@ export default function DownloadQueue({
                   <p className="text-xs text-apple-text-secondary-light dark:text-apple-text-secondary-dark mt-0.5 truncate">
                     {item.status === 'merging'
                       ? 'Post-processing / Merging streams'
-                      : `Speed: ${item.speed} | ETA: ${item.eta}`}
+                      : `${item.fileSize ? `Size: ${item.fileSize} | ` : ''}Speed: ${item.speed} | ETA: ${item.eta}`}
                   </p>
                 </div>
 

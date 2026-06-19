@@ -129,6 +129,48 @@ export default function App(): React.JSX.Element {
     }
   }, [])
 
+  // Background task to fetch file sizes for queued items
+  useEffect(() => {
+    if (!window.api || !window.api.getFileSize) return
+
+    // Find items that need their size calculated
+    const itemsToFetch = queue.filter(
+      (item) => item.status === 'ready' && item.fileSize === undefined
+    )
+
+    if (itemsToFetch.length === 0) return
+
+    // Mark them as calculating first to prevent duplicate trigger loops
+    setQueue((prev) =>
+      prev.map((q) => {
+        const found = itemsToFetch.find((item) => item.id === q.id)
+        if (found) {
+          return { ...q, fileSize: 'Calculating size...' }
+        }
+        return q
+      })
+    )
+
+    // Run parallel calls to get size
+    itemsToFetch.forEach(async (item) => {
+      try {
+        const size = await window.api.getFileSize({
+          url: item.url || '',
+          format: item.format || 'mp4',
+          resolution: item.resolution || '1080'
+        })
+        setQueue((prev) =>
+          prev.map((q) => (q.id === item.id ? { ...q, fileSize: size || 'Unknown' } : q))
+        )
+      } catch (err) {
+        console.error('Failed to fetch file size:', err)
+        setQueue((prev) =>
+          prev.map((q) => (q.id === item.id ? { ...q, fileSize: 'Unknown' } : q))
+        )
+      }
+    })
+  }, [queue])
+
   // Dynamically fetch video info when the URL changes
   useEffect(() => {
     const trimmed = urlInput.trim()
@@ -711,7 +753,8 @@ export default function App(): React.JSX.Element {
               ...item,
               format: newFormat,
               resolution:
-                newFormat === 'mp3' ? 'best' : item.resolution === 'best' ? '1080' : item.resolution
+                newFormat === 'mp3' ? 'best' : item.resolution === 'best' ? '1080' : item.resolution,
+              fileSize: undefined
             }
           : item
       )
@@ -724,7 +767,8 @@ export default function App(): React.JSX.Element {
         item.id === id
           ? {
               ...item,
-              resolution: newRes
+              resolution: newRes,
+              fileSize: undefined
             }
           : item
       )
@@ -882,7 +926,7 @@ export default function App(): React.JSX.Element {
         {/* Footer Info */}
         <div className="flex items-center space-x-2 px-2 text-xs text-apple-text-secondary-light/60 dark:text-apple-text-secondary-dark/60">
           <HelpCircle className="w-3.5 h-3.5" />
-          <span>v1.0.0 • yt-dlp Wrapper</span>
+          <span>v1.0.2 • yt-dlp Wrapper</span>
         </div>
       </aside>
 

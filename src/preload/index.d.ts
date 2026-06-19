@@ -25,6 +25,11 @@ export interface ApiBridge {
       resolutions: string[]
     }[]
   >
+  getFileSize: (args: {
+    url: string
+    format: 'mp4' | 'mp3' | 'best'
+    resolution: string
+  }) => Promise<string>
   showInFolder: (filePath: string) => Promise<boolean>
   playFile: (filePath: string) => Promise<boolean>
   checkYtdlUpdates: () => Promise<{

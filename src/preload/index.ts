@@ -18,6 +18,11 @@ const api = {
   }) => ipcRenderer.invoke('start-download', args),
   cancelDownload: (id: string) => ipcRenderer.invoke('cancel-download', id),
   getVideoInfo: (url: string) => ipcRenderer.invoke('get-video-info', url),
+  getFileSize: (args: {
+    url: string
+    format: 'mp4' | 'mp3' | 'best'
+    resolution: string
+  }) => ipcRenderer.invoke('get-file-size', args),
   showInFolder: (filePath: string) => ipcRenderer.invoke('show-in-folder', filePath),
   playFile: (filePath: string) => ipcRenderer.invoke('play-file', filePath),
   checkYtdlUpdates: () => ipcRenderer.invoke('check-ytdl-updates'),

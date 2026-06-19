@@ -19,6 +19,7 @@ export interface DownloadProgress {
   url?: string
   format?: 'mp4' | 'mp3' | 'best'
   resolution?: string
+  fileSize?: string
 }
 
 export class Downloader {
@@ -202,7 +203,8 @@ export class Downloader {
               speed,
               eta,
               status: 'downloading',
-              fileName: parsedFileName
+              fileName: parsedFileName,
+              fileSize: totalSize
             })
 
             this.settingsManager.updateHistoryItemStatus(id, 'downloading', {
@@ -426,6 +428,93 @@ export class Downloader {
         } catch (err: any) {
           reject(new Error(`Failed to parse video info: ${err.message}`))
         }
+      })
+    })
+  }
+
+  async getFileSize(
+    url: string,
+    format: 'mp4' | 'mp3' | 'best',
+    resolution: string
+  ): Promise<string> {
+    const settings = this.settingsManager.getSettings()
+    const proxy = settings.proxy
+    const ytdlpPath = this.binaryManager.getYtdlpPath()
+
+    const args: string[] = ['--simulate', '--no-playlist']
+
+    if (proxy && proxy.trim()) {
+      args.push('--proxy', proxy.trim())
+    }
+
+    if (format === 'mp4') {
+      if (resolution && resolution !== 'best') {
+        args.push(
+          '--format',
+          `bestvideo[height<=${resolution}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${resolution}][ext=mp4]/best`
+        )
+      } else {
+        args.push('--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best')
+      }
+    } else if (format === 'mp3') {
+      args.push('--format', 'bestaudio/best')
+    } else {
+      if (resolution && resolution !== 'best') {
+        args.push('--format', `bestvideo[height<=${resolution}]+bestaudio/best`)
+      } else {
+        args.push('--format', 'bestvideo+bestaudio/best')
+      }
+    }
+
+    args.push('--print', '%(filesize,filesize_approx)s')
+    args.push(url)
+
+    return new Promise((resolve) => {
+      const proc = spawn(ytdlpPath, args, {
+        windowsHide: true
+      })
+
+      let stdout = ''
+      let settled = false
+
+      const timeout = setTimeout(() => {
+        if (settled) return
+        settled = true
+        proc.kill('SIGKILL')
+        resolve('Unknown')
+      }, 15000)
+
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString()
+      })
+
+      proc.on('close', (code) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+
+        if (code !== 0) {
+          resolve('Unknown')
+          return
+        }
+
+        const sizeStr = stdout.trim()
+        if (sizeStr && sizeStr !== 'NA' && sizeStr !== 'None') {
+          const bytes = parseInt(sizeStr, 10)
+          if (!isNaN(bytes)) {
+            const sizeMB = (bytes / (1024 * 1024)).toFixed(1)
+            resolve(`${sizeMB} MiB`)
+            return
+          }
+        }
+        resolve('Unknown')
+      })
+
+      proc.on('error', () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        resolve('Unknown')
       })
     })
   }

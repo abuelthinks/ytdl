@@ -209,6 +209,10 @@ function registerIpcHandlers(): void {
     return downloader.getVideoInfo(url)
   })
 
+  ipcMain.handle('get-file-size', async (_, { url, format, resolution }) => {
+    return downloader.getFileSize(url, format, resolution)
+  })
+
   ipcMain.handle('show-in-folder', async (_, filePath) => {
     if (filePath && fs.existsSync(filePath)) {
       shell.showItemInFolder(filePath)
