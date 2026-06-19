@@ -176,7 +176,7 @@ export default function App(): React.JSX.Element {
           }
         } else {
           // Simulated Preview in Browser Preview
-          const isPlaylist = trimmed.includes('list=')
+          const isPlaylist = trimmed.includes('list=') && !trimmed.includes('v=')
 
           if (isPlaylist) {
             const newItems = [

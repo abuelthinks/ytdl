@@ -341,6 +341,11 @@ export class Downloader {
     // Use --flat-playlist to resolve playlists instantly
     const args: string[] = ['--flat-playlist', '--dump-json']
 
+    // Prevent fetching entire playlists when a video link belongs to a playlist
+    if (url.includes('v=') || url.includes('/shorts/') || url.includes('embed/')) {
+      args.push('--no-playlist')
+    }
+
     if (proxy && proxy.trim()) {
       args.push('--proxy', proxy.trim())
     }
