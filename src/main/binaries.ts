@@ -17,6 +17,7 @@ export class BinaryManager {
   private binDir: string
   private ytdlpPath: string
   private ffmpegPath: string
+  private aria2Path: string
 
   constructor() {
     // Save binaries to AppData/Local/ytdl-app/bin (or equivalent)
@@ -26,6 +27,7 @@ export class BinaryManager {
 
     this.ytdlpPath = path.join(this.binDir, isWin ? 'yt-dlp.exe' : 'yt-dlp')
     this.ffmpegPath = path.join(this.binDir, isWin ? 'ffmpeg.exe' : 'ffmpeg')
+    this.aria2Path = path.join(this.binDir, isWin ? 'aria2c.exe' : 'aria2c')
   }
 
   getBinDir(): string {
@@ -46,6 +48,21 @@ export class BinaryManager {
       return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
     }
     return this.ffmpegPath
+  }
+
+  getAria2Path(): string {
+    // Check system PATH first, then local bin folder
+    if (this.isInSystemPath(process.platform === 'win32' ? 'aria2c.exe' : 'aria2c')) {
+      return process.platform === 'win32' ? 'aria2c.exe' : 'aria2c'
+    }
+    return this.aria2Path
+  }
+
+  hasAria2(): boolean {
+    return (
+      fs.existsSync(this.aria2Path) ||
+      this.isInSystemPath(process.platform === 'win32' ? 'aria2c.exe' : 'aria2c')
+    )
   }
 
   private isInSystemPath(cmd: string): boolean {
@@ -140,6 +157,47 @@ export class BinaryManager {
     // Make executable on unix platforms
     if (process.platform !== 'win32') {
       fs.chmodSync(this.ffmpegPath, 0o755)
+    }
+  }
+
+  // Torrent engine, installed lazily the first time a torrent download starts
+  async downloadAria2(onProgress: (percent: number) => void): Promise<void> {
+    await this.ensureDirectory()
+
+    if (process.platform !== 'win32') {
+      throw new Error(
+        'Automatic aria2 install is only supported on Windows. Install it manually (brew install aria2 / apt install aria2) and try again.'
+      )
+    }
+
+    const build = 'aria2-1.37.0-win-64bit-build1'
+    const url = `https://github.com/aria2/aria2/releases/download/release-1.37.0/${build}.zip`
+    const tempZip = path.join(this.binDir, 'aria2.zip')
+
+    await this.downloadWithProgress(url, tempZip, onProgress)
+
+    try {
+      await execAsync(`tar -xf "${tempZip}" -C "${this.binDir}"`)
+    } catch (err) {
+      console.error('Extraction failed, attempting powershell fallback:', err)
+      await execAsync(
+        `powershell -Command "Expand-Archive -Path '${tempZip}' -DestinationPath '${this.binDir}' -Force"`
+      )
+    } finally {
+      if (fs.existsSync(tempZip)) {
+        await fs.promises.unlink(tempZip)
+      }
+    }
+
+    // The zip contains a versioned folder; move the exe up and drop the rest
+    const extractedExe = path.join(this.binDir, build, 'aria2c.exe')
+    if (fs.existsSync(extractedExe)) {
+      await fs.promises.copyFile(extractedExe, this.aria2Path)
+      await fs.promises.rm(path.join(this.binDir, build), { recursive: true, force: true })
+    }
+
+    if (!fs.existsSync(this.aria2Path)) {
+      throw new Error('aria2c.exe was not found after extraction.')
     }
   }
 

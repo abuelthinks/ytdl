@@ -1,4 +1,6 @@
 import { spawn, execSync, ChildProcess } from 'child_process'
+import http from 'http'
+import https from 'https'
 import path from 'path'
 import fs from 'fs'
 import { BinaryManager } from './binaries'
@@ -10,16 +12,25 @@ export interface DownloadProgress {
   percent: number
   speed: string
   eta: string
-  status: 'downloading' | 'merging' | 'completed' | 'failed' | 'cancelled' | 'ready' | 'queued'
+  status:
+    | 'downloading'
+    | 'merging'
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+    | 'ready'
+    | 'queued'
+    | 'paused'
   fileName?: string
   title?: string
   thumbnail?: string
   uploader?: string
   duration?: number
   url?: string
-  format?: 'mp4' | 'mp3' | 'best'
+  format?: 'mp4' | 'mp3' | 'best' | 'file' | 'torrent'
   resolution?: string
   fileSize?: string
+  error?: string
 }
 
 export class Downloader {
@@ -28,6 +39,16 @@ export class Downloader {
     {
       proc: ChildProcess
       filePaths: Set<string>
+      kind: 'ytdlp' | 'torrent'
+      lastPercent: number
+    }
+  >()
+  private activeFileDownloads = new Map<
+    string,
+    {
+      req: http.ClientRequest
+      filePath: string
+      cancelled: boolean
     }
   >()
   private binaryManager: BinaryManager
@@ -41,12 +62,22 @@ export class Downloader {
   async download(
     id: string,
     url: string,
-    format: 'mp4' | 'mp3' | 'best',
+    format: 'mp4' | 'mp3' | 'best' | 'file' | 'torrent',
     resolution: string,
     window: BrowserWindow,
     title?: string,
     referer?: string
   ): Promise<void> {
+    // Direct file downloads (PDFs, archives, images, etc.) bypass yt-dlp entirely
+    if (format === 'file') {
+      return this.downloadFile(id, url, window, title, referer)
+    }
+
+    // Magnet links and .torrent URLs go through the aria2 torrent engine
+    if (format === 'torrent') {
+      return this.downloadTorrent(id, url, window, title)
+    }
+
     const settings = this.settingsManager.getSettings()
     const targetDir = format === 'mp3' ? settings.downloadDirMusic : settings.downloadDirVideo
     const proxy = settings.proxy
@@ -127,13 +158,18 @@ export class Downloader {
     }
 
     this.settingsManager.addHistoryItem(initialItem)
+    // Include url/format/resolution so queue items created by this event
+    // (extension-initiated downloads) hold everything needed to retry later
     this.sendProgress(window, {
       id,
       percent: 0,
       speed: '0 B/s',
       eta: '--:--',
       status: 'downloading',
-      title: title || ''
+      title: title || '',
+      url,
+      format,
+      resolution
     })
 
     console.log(`Spawning yt-dlp with args:`, args)
@@ -142,7 +178,12 @@ export class Downloader {
       windowsHide: true
     })
 
-    this.activeProcesses.set(id, { proc, filePaths: new Set<string>() })
+    this.activeProcesses.set(id, {
+      proc,
+      filePaths: new Set<string>(),
+      kind: 'ytdlp',
+      lastPercent: 0
+    })
 
     let stdoutBuffer = ''
     let parsedTitle = ''
@@ -326,6 +367,556 @@ export class Downloader {
     })
   }
 
+  // Downloads torrent content (magnet link or .torrent URL) via aria2c,
+  // installing the engine on first use like the other managed binaries.
+  private async downloadTorrent(
+    id: string,
+    url: string,
+    window: BrowserWindow,
+    title?: string
+  ): Promise<void> {
+    const settings = this.settingsManager.getSettings()
+    const targetDir = settings.downloadDirFiles || path.join(settings.downloadDir, 'Files')
+
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true })
+    }
+
+    const initialName = title || 'Torrent download'
+    this.settingsManager.addHistoryItem({
+      id,
+      url,
+      title: initialName,
+      fileName: initialName,
+      filePath: '',
+      fileSize: 'Unknown',
+      date: new Date().toLocaleString(),
+      format: 'torrent',
+      status: 'downloading'
+    })
+    this.sendProgress(window, {
+      id,
+      percent: 0,
+      speed: 'Connecting...',
+      eta: '--:--',
+      status: 'downloading',
+      title: initialName,
+      url,
+      format: 'torrent',
+      resolution: 'best'
+    })
+
+    // Lazy-install aria2c on first torrent download
+    if (!this.binaryManager.hasAria2()) {
+      try {
+        await this.binaryManager.downloadAria2((percent) => {
+          this.sendProgress(window, {
+            id,
+            percent: 0,
+            speed: `Installing torrent engine... ${percent}%`,
+            eta: '--:--',
+            status: 'downloading',
+            title: initialName
+          })
+        })
+      } catch (err: any) {
+        console.error('Failed to install aria2:', err)
+        this.settingsManager.updateHistoryItemStatus(id, 'failed')
+        this.sendProgress(window, {
+          id,
+          percent: 0,
+          speed: 'Failed',
+          eta: '--:--',
+          status: 'failed',
+          error: err.message
+        })
+        return
+      }
+    }
+
+    const aria2Path = this.binaryManager.getAria2Path()
+    const args = [
+      '--seed-time=0',
+      '--summary-interval=1',
+      '--console-log-level=warn',
+      '--follow-torrent=mem',
+      '--bt-save-metadata=false',
+      '-d',
+      targetDir,
+      url
+    ]
+
+    console.log(`Spawning aria2c with args:`, args)
+
+    const proc = spawn(aria2Path, args, {
+      windowsHide: true
+    })
+
+    this.activeProcesses.set(id, {
+      proc,
+      filePaths: new Set<string>(),
+      kind: 'torrent',
+      lastPercent: 0
+    })
+
+    let stdoutBuffer = ''
+    let capturedPath = ''
+
+    proc.stdout.on('data', (data) => {
+      stdoutBuffer += data.toString()
+      const lines = stdoutBuffer.split(/\r?\n/)
+      stdoutBuffer = lines.pop() || ''
+
+      for (const line of lines) {
+        if (!line.trim()) continue
+        console.log(`[aria2c stdout]: ${line}`)
+
+        // Track the output path so cancel can clean up and history can link it.
+        // Multi-file torrents report a file inside the torrent's root folder,
+        // so resolve back to the first path segment under targetDir.
+        // e.g. FILE: C:\Downloads\Files\Ubuntu\ubuntu.iso
+        const fileMatch = line.match(/^\s*FILE:\s*(.+)$/)
+        if (fileMatch && fileMatch[1] && !fileMatch[1].includes('[METADATA]')) {
+          const reported = fileMatch[1].trim()
+          const relative = path.relative(targetDir, reported)
+          if (relative && !relative.startsWith('..')) {
+            const rootSegment = relative.split(/[\\/]/)[0]
+            capturedPath = path.join(targetDir, rootSegment)
+            const info = this.activeProcesses.get(id)
+            if (info) {
+              info.filePaths.add(capturedPath)
+            }
+            this.settingsManager.updateHistoryItemStatus(id, 'downloading', {
+              title: rootSegment,
+              fileName: rootSegment,
+              filePath: capturedPath
+            })
+          }
+        }
+
+        // Progress readout, printed every summary interval
+        // e.g. [#6f2yj7 87MiB/1.2GiB(7%) CN:24 SD:15 DL:5.1MiB ETA:3m48s]
+        const progressMatch = line.match(
+          /\[#\w+\s+[\d.]+(?:[KMGTP]i)?B\/([\d.]+(?:[KMGTP]i)?B)\((\d+(?:\.\d+)?)%\)/
+        )
+        if (progressMatch) {
+          const totalSize = progressMatch[1]
+          const percent = parseFloat(progressMatch[2])
+          const speedMatch = line.match(/DL:([\d.]+(?:[KMGTP]i)?B)/)
+          const etaMatch = line.match(/ETA:([^\s\]]+)/)
+
+          const info = this.activeProcesses.get(id)
+          if (info) {
+            info.lastPercent = percent
+          }
+
+          this.sendProgress(window, {
+            id,
+            percent,
+            speed: speedMatch ? `${speedMatch[1]}/s` : '0 B/s',
+            eta: etaMatch ? etaMatch[1] : '--:--',
+            status: 'downloading',
+            fileName: capturedPath ? path.basename(capturedPath) : undefined,
+            fileSize: totalSize
+          })
+
+          this.settingsManager.updateHistoryItemStatus(id, 'downloading', {
+            fileSize: totalSize
+          })
+        }
+      }
+    })
+
+    proc.stderr.on('data', (data) => {
+      console.error(`[aria2c stderr]: ${data.toString()}`)
+    })
+
+    proc.on('error', (err) => {
+      console.error(`Failed to spawn aria2c:`, err)
+    })
+
+    proc.on('close', (code) => {
+      const wasCancelled = !this.activeProcesses.has(id)
+      this.activeProcesses.delete(id)
+      console.log(`aria2c for ${id} exited with code ${code}, wasCancelled: ${wasCancelled}`)
+
+      if (code === 0) {
+        const finalName = capturedPath ? path.basename(capturedPath) : initialName
+        this.settingsManager.updateHistoryItemStatus(id, 'completed', {
+          status: 'completed',
+          title: finalName,
+          fileName: finalName,
+          filePath: capturedPath,
+          fileSize: capturedPath ? this.formatBytes(this.getPathSize(capturedPath)) : 'Unknown'
+        })
+        this.sendProgress(window, {
+          id,
+          percent: 100,
+          speed: 'Done',
+          eta: '00:00',
+          status: 'completed',
+          fileName: finalName
+        })
+      } else if (!wasCancelled) {
+        this.settingsManager.updateHistoryItemStatus(id, 'failed')
+        this.sendProgress(window, {
+          id,
+          percent: 0,
+          speed: 'Failed',
+          eta: '--:--',
+          status: 'failed'
+        })
+      }
+    })
+  }
+
+  // Total size of a file, or a directory tree (multi-file torrents)
+  private getPathSize(target: string): number {
+    try {
+      const stats = fs.statSync(target)
+      if (stats.isFile()) return stats.size
+      if (stats.isDirectory()) {
+        return fs
+          .readdirSync(target)
+          .reduce((sum, entry) => sum + this.getPathSize(path.join(target, entry)), 0)
+      }
+    } catch {
+      // Path missing or unreadable — treat as zero
+    }
+    return 0
+  }
+
+  // Downloads any direct file URL (PDF, ZIP, image, installer, ...) over HTTP
+  // with the same progress/cancel/history flow as media downloads.
+  private downloadFile(
+    id: string,
+    url: string,
+    window: BrowserWindow,
+    title?: string,
+    referer?: string
+  ): Promise<void> {
+    const settings = this.settingsManager.getSettings()
+    const targetDir = settings.downloadDirFiles || path.join(settings.downloadDir, 'Files')
+
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true })
+    }
+
+    const initialName = title || this.fileNameFromUrl(url) || 'Direct file'
+    this.settingsManager.addHistoryItem({
+      id,
+      url,
+      title: initialName,
+      fileName: initialName,
+      filePath: '',
+      fileSize: 'Unknown',
+      date: new Date().toLocaleString(),
+      format: 'file',
+      status: 'downloading'
+    })
+    this.sendProgress(window, {
+      id,
+      percent: 0,
+      speed: '0 B/s',
+      eta: '--:--',
+      status: 'downloading',
+      title: initialName,
+      url,
+      format: 'file',
+      resolution: 'best'
+    })
+
+    return new Promise((resolve) => {
+      const fail = (message: string): void => {
+        const entry = this.activeFileDownloads.get(id)
+        if (entry?.cancelled) {
+          resolve()
+          return
+        }
+        this.activeFileDownloads.delete(id)
+        console.error(`File download ${id} failed:`, message)
+        this.settingsManager.updateHistoryItemStatus(id, 'failed')
+        this.sendProgress(window, {
+          id,
+          percent: 0,
+          speed: 'Failed',
+          eta: '--:--',
+          status: 'failed'
+        })
+        resolve()
+      }
+
+      const request = (currentUrl: string, redirectsLeft: number): void => {
+        let parsed: URL
+        try {
+          parsed = new URL(currentUrl)
+        } catch {
+          fail('Invalid URL')
+          return
+        }
+
+        const lib = parsed.protocol === 'http:' ? http : https
+        const req = lib.get(
+          parsed,
+          {
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+              ...(referer ? { Referer: referer } : {})
+            }
+          },
+          (res) => {
+            const status = res.statusCode || 0
+
+            if (status >= 300 && status < 400 && res.headers.location) {
+              res.resume()
+              if (redirectsLeft <= 0) {
+                fail('Too many redirects')
+                return
+              }
+              request(new URL(res.headers.location, currentUrl).toString(), redirectsLeft - 1)
+              return
+            }
+
+            if (status < 200 || status >= 300) {
+              res.resume()
+              fail(`Server responded with status ${status}`)
+              return
+            }
+
+            const fileName = this.resolveFileName(
+              res.headers['content-disposition'],
+              currentUrl,
+              title
+            )
+            const filePath = this.uniquePath(targetDir, fileName)
+            const totalBytes = parseInt(res.headers['content-length'] || '', 10) || 0
+
+            const entry = this.activeFileDownloads.get(id)
+            if (entry) {
+              entry.req = req
+              entry.filePath = filePath
+            }
+
+            this.settingsManager.updateHistoryItemStatus(id, 'downloading', {
+              title: path.basename(filePath, path.extname(filePath)) || fileName,
+              fileName: path.basename(filePath),
+              filePath,
+              ...(totalBytes > 0 ? { fileSize: this.formatBytes(totalBytes) } : {})
+            })
+
+            const out = fs.createWriteStream(filePath)
+            let received = 0
+            let lastSent = 0
+            let lastBytes = 0
+            let lastTime = Date.now()
+
+            res.on('data', (chunk: Buffer) => {
+              received += chunk.length
+              const now = Date.now()
+              if (now - lastSent >= 250) {
+                const speedBps = ((received - lastBytes) / Math.max(now - lastTime, 1)) * 1000
+                this.sendProgress(window, {
+                  id,
+                  percent: totalBytes > 0 ? (received / totalBytes) * 100 : 0,
+                  speed: `${this.formatBytes(speedBps)}/s`,
+                  eta:
+                    totalBytes > 0 && speedBps > 0
+                      ? this.formatEta((totalBytes - received) / speedBps)
+                      : '--:--',
+                  status: 'downloading',
+                  fileName: path.basename(filePath),
+                  fileSize: totalBytes > 0 ? this.formatBytes(totalBytes) : undefined
+                })
+                lastSent = now
+                lastBytes = received
+                lastTime = now
+              }
+            })
+
+            res.pipe(out)
+
+            out.on('finish', () => {
+              const finished = this.activeFileDownloads.get(id)
+              if (finished?.cancelled) {
+                resolve()
+                return
+              }
+              this.activeFileDownloads.delete(id)
+              this.settingsManager.updateHistoryItemStatus(id, 'completed', {
+                status: 'completed',
+                fileSize: this.formatBytes(received)
+              })
+              this.sendProgress(window, {
+                id,
+                percent: 100,
+                speed: 'Done',
+                eta: '00:00',
+                status: 'completed',
+                fileName: path.basename(filePath)
+              })
+              resolve()
+            })
+
+            res.on('error', (err) => {
+              out.destroy()
+              this.cleanupPartialFile(filePath)
+              fail(err.message)
+            })
+            out.on('error', (err) => {
+              req.destroy()
+              this.cleanupPartialFile(filePath)
+              fail(err.message)
+            })
+          }
+        )
+
+        req.setTimeout(30000, () => {
+          req.destroy(new Error('Connection timed out'))
+        })
+        req.on('error', (err) => fail(err.message))
+
+        const entry = this.activeFileDownloads.get(id)
+        if (entry) {
+          entry.req = req
+        } else {
+          this.activeFileDownloads.set(id, { req, filePath: '', cancelled: false })
+        }
+      }
+
+      request(url, 5)
+    })
+  }
+
+  private resolveFileName(
+    disposition: string | undefined,
+    url: string,
+    fallbackTitle?: string
+  ): string {
+    let name = ''
+    if (disposition) {
+      const utf8 = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+      const plain = disposition.match(/filename="?([^";]+)"?/i)
+      if (utf8 && utf8[1]) {
+        try {
+          name = decodeURIComponent(utf8[1])
+        } catch {
+          name = utf8[1]
+        }
+      } else if (plain && plain[1]) {
+        name = plain[1]
+      }
+    }
+    if (!name) {
+      name = this.fileNameFromUrl(url)
+    }
+    if (!name) {
+      name = fallbackTitle || 'download'
+    }
+    return name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'download'
+  }
+
+  private fileNameFromUrl(url: string): string {
+    try {
+      const pathname = new URL(url).pathname
+      const base = pathname.split('/').filter(Boolean).pop() || ''
+      return decodeURIComponent(base)
+    } catch {
+      return ''
+    }
+  }
+
+  private uniquePath(dir: string, fileName: string): string {
+    const ext = path.extname(fileName)
+    const base = path.basename(fileName, ext)
+    let candidate = path.join(dir, fileName)
+    let counter = 1
+    while (fs.existsSync(candidate)) {
+      candidate = path.join(dir, `${base} (${counter})${ext}`)
+      counter++
+    }
+    return candidate
+  }
+
+  private cleanupPartialFile(filePath: string): void {
+    try {
+      if (filePath && fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath)
+      }
+    } catch (err) {
+      console.error(`Failed to clean up partial file ${filePath}:`, err)
+    }
+  }
+
+  private formatBytes(bytes: number): string {
+    if (!bytes || bytes <= 0) return '0 B'
+    const units = ['B', 'KiB', 'MiB', 'GiB']
+    let value = bytes
+    let unit = 0
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024
+      unit++
+    }
+    return `${value.toFixed(unit === 0 ? 0 : value >= 100 ? 1 : 2)} ${units[unit]}`
+  }
+
+  private formatEta(totalSeconds: number): string {
+    const total = Math.max(0, Math.round(totalSeconds))
+    const hrs = Math.floor(total / 3600)
+    const mins = Math.floor((total % 3600) / 60)
+    const secs = total % 60
+    if (hrs > 0) {
+      return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+    }
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+  }
+
+  // HEAD request to read Content-Length for direct file links
+  private getRemoteFileSize(url: string): Promise<string> {
+    return new Promise((resolve) => {
+      const attempt = (currentUrl: string, redirectsLeft: number): void => {
+        let parsed: URL
+        try {
+          parsed = new URL(currentUrl)
+        } catch {
+          resolve('Unknown')
+          return
+        }
+
+        const lib = parsed.protocol === 'http:' ? http : https
+        const req = lib.request(
+          parsed,
+          {
+            method: 'HEAD',
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+            }
+          },
+          (res) => {
+            res.resume()
+            const status = res.statusCode || 0
+            if (status >= 300 && status < 400 && res.headers.location && redirectsLeft > 0) {
+              attempt(new URL(res.headers.location, currentUrl).toString(), redirectsLeft - 1)
+              return
+            }
+            const length = parseInt(res.headers['content-length'] || '', 10)
+            resolve(length > 0 ? this.formatBytes(length) : 'Unknown')
+          }
+        )
+
+        req.setTimeout(10000, () => {
+          req.destroy()
+          resolve('Unknown')
+        })
+        req.on('error', () => resolve('Unknown'))
+        req.end()
+      }
+
+      attempt(url, 5)
+    })
+  }
+
   async getVideoInfo(url: string): Promise<
     {
       title: string
@@ -434,9 +1025,18 @@ export class Downloader {
 
   async getFileSize(
     url: string,
-    format: 'mp4' | 'mp3' | 'best',
+    format: 'mp4' | 'mp3' | 'best' | 'file' | 'torrent',
     resolution: string
   ): Promise<string> {
+    if (format === 'file') {
+      return this.getRemoteFileSize(url)
+    }
+
+    // Torrent size is only known once metadata is fetched from peers
+    if (format === 'torrent') {
+      return 'Unknown'
+    }
+
     const settings = this.settingsManager.getSettings()
     const proxy = settings.proxy
     const ytdlpPath = this.binaryManager.getYtdlpPath()
@@ -521,6 +1121,27 @@ export class Downloader {
 
   cancel(id: string, window: BrowserWindow): void {
     console.log(`[Downloader.cancel] Cancel requested for ID: ${id}`)
+
+    // Direct file downloads are plain HTTP requests, not yt-dlp processes
+    const fileInfo = this.activeFileDownloads.get(id)
+    if (fileInfo) {
+      fileInfo.cancelled = true
+      fileInfo.req.destroy()
+      setTimeout(() => {
+        this.activeFileDownloads.delete(id)
+        this.cleanupPartialFile(fileInfo.filePath)
+      }, 500)
+      this.settingsManager.removeHistoryItem(id)
+      this.sendProgress(window, {
+        id,
+        percent: 0,
+        speed: 'Cancelled',
+        eta: '--:--',
+        status: 'cancelled'
+      })
+      return
+    }
+
     console.log(
       `[Downloader.cancel] Currently active IDs:`,
       Array.from(this.activeProcesses.keys())
@@ -529,49 +1150,24 @@ export class Downloader {
     const info = this.activeProcesses.get(id)
     if (info) {
       console.log(`[Downloader.cancel] Found active process for ID: ${id}, PID: ${info.proc.pid}`)
-      if (process.platform === 'win32') {
-        const pid = info.proc.pid
-        if (pid) {
-          console.log(`[Downloader.cancel] Running taskkill /pid ${pid} /T /F to kill process tree`)
-          try {
-            const systemRoot = process.env.SystemRoot || 'C:\\Windows'
-            const taskkillPath = path.join(systemRoot, 'System32', 'taskkill.exe')
-            execSync(`"${taskkillPath}" /pid ${pid} /T /F`, { windowsHide: true })
-            console.log(`[Downloader.cancel] taskkill /pid ${pid} /T /F executed successfully`)
-          } catch (err) {
-            console.error(`[Downloader.cancel] taskkill failed, falling back to process.kill:`, err)
-            try {
-              process.kill(pid, 'SIGKILL')
-            } catch (e) {
-              console.error(`[Downloader.cancel] process.kill fallback failed:`, e)
-            }
-          }
-        } else {
-          info.proc.kill('SIGKILL')
-        }
-      } else {
-        info.proc.kill('SIGKILL')
-      }
+      this.killProcessTree(info.proc)
 
       this.activeProcesses.delete(id)
 
-      // Auto delete partial files
+      // Auto delete partial files (torrents may leave a folder + .aria2 control file)
       setTimeout(() => {
         for (const filePath of info.filePaths) {
           try {
             if (fs.existsSync(filePath)) {
-              fs.unlinkSync(filePath)
+              fs.rmSync(filePath, { recursive: true, force: true })
               console.log(`Deleted cancelled download file: ${filePath}`)
             }
-            const partPath = filePath + '.part'
-            if (fs.existsSync(partPath)) {
-              fs.unlinkSync(partPath)
-              console.log(`Deleted cancelled download part file: ${partPath}`)
-            }
-            const ytdlPath = filePath + '.ytdl'
-            if (fs.existsSync(ytdlPath)) {
-              fs.unlinkSync(ytdlPath)
-              console.log(`Deleted cancelled download ytdl file: ${ytdlPath}`)
+            for (const suffix of ['.part', '.ytdl', '.aria2']) {
+              const extraPath = filePath + suffix
+              if (fs.existsSync(extraPath)) {
+                fs.unlinkSync(extraPath)
+                console.log(`Deleted cancelled download ${suffix} file: ${extraPath}`)
+              }
             }
           } catch (err: any) {
             console.error(`Failed to clean up files for cancelled download ${id}:`, err)
@@ -590,7 +1186,75 @@ export class Downloader {
         status: 'cancelled'
       })
     } else {
+      // Paused torrents have no active process; clean up using the history record
+      const historyItem = this.settingsManager.getSettings().history.find((h) => h.id === id)
+      if (historyItem && historyItem.status === 'paused') {
+        try {
+          if (historyItem.filePath && fs.existsSync(historyItem.filePath)) {
+            fs.rmSync(historyItem.filePath, { recursive: true, force: true })
+          }
+          const controlFile = historyItem.filePath + '.aria2'
+          if (historyItem.filePath && fs.existsSync(controlFile)) {
+            fs.unlinkSync(controlFile)
+          }
+        } catch (err) {
+          console.error(`Failed to clean up paused download ${id}:`, err)
+        }
+        this.settingsManager.removeHistoryItem(id)
+        this.sendProgress(window, {
+          id,
+          percent: 0,
+          speed: 'Cancelled',
+          eta: '--:--',
+          status: 'cancelled'
+        })
+        return
+      }
       console.warn(`[Downloader.cancel] No active process found for ID: ${id}`)
+    }
+  }
+
+  // Pauses a torrent by killing aria2c while keeping the partial data and the
+  // .aria2 control file on disk — re-running the same download resumes it.
+  pause(id: string, window: BrowserWindow): void {
+    const info = this.activeProcesses.get(id)
+    if (!info || info.kind !== 'torrent') {
+      console.warn(`[Downloader.pause] No pausable torrent found for ID: ${id}`)
+      return
+    }
+
+    // Remove from the map first so the close handler treats the exit as
+    // intentional instead of reporting a failure
+    this.activeProcesses.delete(id)
+    this.killProcessTree(info.proc)
+
+    this.settingsManager.updateHistoryItemStatus(id, 'paused')
+    this.sendProgress(window, {
+      id,
+      percent: info.lastPercent,
+      speed: 'Paused',
+      eta: '--:--',
+      status: 'paused'
+    })
+  }
+
+  private killProcessTree(proc: ChildProcess): void {
+    const pid = proc.pid
+    if (process.platform === 'win32' && pid) {
+      try {
+        const systemRoot = process.env.SystemRoot || 'C:\\Windows'
+        const taskkillPath = path.join(systemRoot, 'System32', 'taskkill.exe')
+        execSync(`"${taskkillPath}" /pid ${pid} /T /F`, { windowsHide: true })
+      } catch (err) {
+        console.error(`taskkill failed, falling back to process.kill:`, err)
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch (e) {
+          console.error(`process.kill fallback failed:`, e)
+        }
+      }
+    } else {
+      proc.kill('SIGKILL')
     }
   }
 

@@ -1,5 +1,8 @@
 @import 'tailwindcss';
 
+/* Manual theme switching: `dark:` variants apply when .dark is set on <html> */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --font-sans:
     'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
@@ -26,6 +29,15 @@ body {
   overflow: hidden;
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+}
+
+/* Frameless window drag regions */
+.app-drag {
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.app-no-drag {
+  -webkit-app-region: no-drag;
 }
 
 /* Custom scrollbars */

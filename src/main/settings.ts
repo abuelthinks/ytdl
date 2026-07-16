@@ -10,15 +10,16 @@ export interface HistoryItem {
   filePath: string
   fileSize: string
   date: string
-  format: 'mp4' | 'mp3' | 'best'
-  status: 'completed' | 'failed' | 'downloading'
+  format: 'mp4' | 'mp3' | 'best' | 'file' | 'torrent'
+  status: 'completed' | 'failed' | 'downloading' | 'paused'
 }
 
 export interface AppSettings {
   downloadDir: string
   downloadDirVideo: string
   downloadDirMusic: string
-  lastFormat: 'mp4' | 'mp3'
+  downloadDirFiles: string
+  lastFormat: 'mp4' | 'mp3' | 'file'
   lastResolution: string
   proxy: string
   history: HistoryItem[]
@@ -39,6 +40,7 @@ export class SettingsManager {
       downloadDir: app.getPath('downloads'),
       downloadDirVideo: path.join(app.getPath('downloads'), 'Video'),
       downloadDirMusic: path.join(app.getPath('downloads'), 'Music'),
+      downloadDirFiles: path.join(app.getPath('downloads'), 'Files'),
       lastFormat: 'mp4',
       lastResolution: '1080',
       proxy: '',
@@ -57,6 +59,9 @@ export class SettingsManager {
         let musicDir =
           parsed.downloadDirMusic ||
           path.join(parsed.downloadDir || defaultSettings.downloadDir, 'Music')
+        let filesDir =
+          parsed.downloadDirFiles ||
+          path.join(parsed.downloadDir || defaultSettings.downloadDir, 'Files')
 
         if (videoDir === dir) {
           videoDir = path.join(dir, 'Video')
@@ -64,11 +69,15 @@ export class SettingsManager {
         if (musicDir === dir) {
           musicDir = path.join(dir, 'Music')
         }
+        if (filesDir === dir) {
+          filesDir = path.join(dir, 'Files')
+        }
 
         return {
           downloadDir: dir,
           downloadDirVideo: videoDir,
           downloadDirMusic: musicDir,
+          downloadDirFiles: filesDir,
           lastFormat: parsed.lastFormat || defaultSettings.lastFormat,
           lastResolution: parsed.lastResolution || defaultSettings.lastResolution,
           proxy: parsed.proxy || defaultSettings.proxy,
@@ -107,6 +116,9 @@ export class SettingsManager {
     }
     if (updates.downloadDirMusic) {
       this.settings.downloadDirMusic = updates.downloadDirMusic
+    }
+    if (updates.downloadDirFiles) {
+      this.settings.downloadDirFiles = updates.downloadDirFiles
     }
     if (updates.lastFormat) {
       this.settings.lastFormat = updates.lastFormat

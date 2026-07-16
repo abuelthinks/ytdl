@@ -10,11 +10,12 @@ export interface ApiBridge {
   startDownload: (args: {
     id: string
     url: string
-    format: 'mp4' | 'mp3' | 'best'
+    format: 'mp4' | 'mp3' | 'best' | 'file' | 'torrent'
     resolution: string
     title?: string
   }) => Promise<void>
   cancelDownload: (id: string) => Promise<void>
+  pauseDownload: (id: string) => Promise<void>
   getVideoInfo: (url: string) => Promise<
     {
       title: string
@@ -27,9 +28,10 @@ export interface ApiBridge {
   >
   getFileSize: (args: {
     url: string
-    format: 'mp4' | 'mp3' | 'best'
+    format: 'mp4' | 'mp3' | 'best' | 'file' | 'torrent'
     resolution: string
   }) => Promise<string>
+  getFilePath: (file: File) => string
   showInFolder: (filePath: string) => Promise<boolean>
   playFile: (filePath: string) => Promise<boolean>
   checkYtdlUpdates: () => Promise<{
@@ -39,6 +41,12 @@ export interface ApiBridge {
     error?: string
   }>
   updateYtdlp: () => Promise<{ success: boolean; error?: string }>
+  windowMinimize: () => Promise<void>
+  windowMaximizeToggle: () => Promise<boolean>
+  windowClose: () => Promise<void>
+  windowExpand: () => Promise<void>
+  windowSetMini: () => Promise<void>
+  setDockMode: (side: 'left' | 'right' | null) => Promise<void>
   systemInfo: {
     platform: string
     nodeVersion: string

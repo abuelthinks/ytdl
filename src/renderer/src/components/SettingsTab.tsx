@@ -6,7 +6,7 @@ import { CONCURRENCY_OPTIONS, DEFAULT_CONCURRENCY } from '../constants'
 interface SettingsTabProps {
   settings: AppSettings
   hasOngoingDownloads: boolean
-  onSelectDownloadDir: (type: 'video' | 'music') => void
+  onSelectDownloadDir: (type: 'video' | 'music' | 'files') => void
   onConcurrencyChange: (limit: number) => void
   ytdlVersionInfo: { current: string; latest: string; updateAvailable: boolean } | null
   isCheckingUpdates: boolean
@@ -41,7 +41,8 @@ export default function SettingsTab({
             Download Destinations
           </h3>
           <p className="text-xs text-apple-text-secondary-light dark:text-apple-text-secondary-dark mt-1">
-            Choose separate local paths where your downloaded video and music files will be saved.
+            Choose separate local paths where your downloaded video, music, and other files will be
+            saved.
           </p>
         </div>
         <div className="space-y-4">
@@ -77,6 +78,26 @@ export default function SettingsTab({
               <button
                 type="button"
                 onClick={() => onSelectDownloadDir('music')}
+                className="flex items-center space-x-2 px-4 py-2.5 bg-apple-blue hover:bg-apple-blue/90 text-white rounded-xl text-xs font-semibold active:scale-[0.98] transition-all shadow-sm"
+              >
+                <Folder className="w-4 h-4" />
+                <span>Browse...</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Files Folder */}
+          <div className="space-y-2 pt-2 border-t border-apple-border-light/50 dark:border-apple-border-dark/50">
+            <label className="text-xs font-semibold text-apple-text-secondary-light dark:text-apple-text-secondary-dark">
+              Files Save Path
+            </label>
+            <div className="flex space-x-3 items-center">
+              <div className="flex-1 px-4 py-2.5 bg-apple-gray-bg-light dark:bg-apple-gray-bg-dark border border-apple-border-light dark:border-apple-border-dark rounded-xl text-xs font-mono truncate text-apple-text-secondary-light dark:text-apple-text-secondary-dark">
+                {settings.downloadDirFiles || 'Not Configured'}
+              </div>
+              <button
+                type="button"
+                onClick={() => onSelectDownloadDir('files')}
                 className="flex items-center space-x-2 px-4 py-2.5 bg-apple-blue hover:bg-apple-blue/90 text-white rounded-xl text-xs font-semibold active:scale-[0.98] transition-all shadow-sm"
               >
                 <Folder className="w-4 h-4" />

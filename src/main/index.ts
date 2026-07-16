@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, screen } from 'electron'
 import { join } from 'path'
 import fs from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -9,6 +9,9 @@ import { Downloader } from './downloader'
 import { LocalServer } from './server'
 
 let mainWindow: BrowserWindow | null = null
+let preDockBounds: Electron.Rectangle | null = null
+const DOCK_WIDTH = 380
+const DEFAULT_WINDOW = { width: 960, height: 700 }
 const binaryManager = new BinaryManager()
 const settingsManager = new SettingsManager()
 const downloader = new Downloader(binaryManager, settingsManager)
@@ -17,9 +20,12 @@ const localServer = new LocalServer(downloader, () => mainWindow)
 function createWindow(): void {
   // Create the browser window.
   mainWindow = new BrowserWindow({
-    width: 960,
-    height: 700,
+    width: DEFAULT_WINDOW.width,
+    height: DEFAULT_WINDOW.height,
+    minWidth: 280,
+    minHeight: 220,
     show: false,
+    frame: false,
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
@@ -50,6 +56,72 @@ function createWindow(): void {
 
 // Register IPC Listeners
 function registerIpcHandlers(): void {
+  // Window controls (frameless window)
+  ipcMain.handle('window-minimize', () => {
+    mainWindow?.minimize()
+  })
+
+  ipcMain.handle('window-maximize-toggle', () => {
+    if (!mainWindow) return false
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize()
+      return false
+    }
+    mainWindow.maximize()
+    return true
+  })
+
+  ipcMain.handle('window-close', () => {
+    mainWindow?.close()
+  })
+
+  // Shrink the window into mini mode
+  ipcMain.handle('window-set-mini', () => {
+    if (!mainWindow) return
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize()
+    }
+    mainWindow.setSize(300, 240)
+  })
+
+  // Restore a comfortable size from mini mode
+  ipcMain.handle('window-expand', () => {
+    if (!mainWindow) return
+    mainWindow.setAlwaysOnTop(false)
+    mainWindow.setSize(DEFAULT_WINDOW.width, DEFAULT_WINDOW.height)
+    mainWindow.center()
+  })
+
+  // Dock the window to a screen edge (or restore with null)
+  ipcMain.handle('window-set-dock', (_, side: 'left' | 'right' | null) => {
+    if (!mainWindow) return
+    if (side) {
+      if (!preDockBounds && !mainWindow.isMaximized()) {
+        preDockBounds = mainWindow.getBounds()
+      }
+      if (mainWindow.isMaximized()) {
+        mainWindow.unmaximize()
+      }
+      const { workArea } = screen.getDisplayMatching(mainWindow.getBounds())
+      mainWindow.setAlwaysOnTop(true)
+      mainWindow.setBounds({
+        x: side === 'left' ? workArea.x : workArea.x + workArea.width - DOCK_WIDTH,
+        y: workArea.y,
+        width: DOCK_WIDTH,
+        height: workArea.height
+      })
+    } else {
+      mainWindow.setAlwaysOnTop(false)
+      if (preDockBounds) {
+        mainWindow.setBounds(preDockBounds)
+        preDockBounds = null
+      } else {
+        mainWindow.setSize(DEFAULT_WINDOW.width, DEFAULT_WINDOW.height)
+        mainWindow.center()
+      }
+    }
+  })
+
   // Binary Management
   ipcMain.handle('check-binaries', () => {
     return binaryManager.getStatus()
@@ -203,6 +275,11 @@ function registerIpcHandlers(): void {
   ipcMain.handle('cancel-download', (_, id) => {
     if (!mainWindow) return
     downloader.cancel(id, mainWindow)
+  })
+
+  ipcMain.handle('pause-download', (_, id) => {
+    if (!mainWindow) return
+    downloader.pause(id, mainWindow)
   })
 
   ipcMain.handle('get-video-info', async (_, url) => {

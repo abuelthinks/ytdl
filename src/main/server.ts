@@ -62,8 +62,14 @@ export class LocalServer {
               return
             }
 
-            const fmt: 'mp4' | 'mp3' | 'best' =
-              format === 'mp4' || format === 'mp3' || format === 'best' ? format : 'best'
+            const fmt: 'mp4' | 'mp3' | 'best' | 'file' | 'torrent' =
+              format === 'mp4' ||
+              format === 'mp3' ||
+              format === 'best' ||
+              format === 'file' ||
+              format === 'torrent'
+                ? format
+                : 'best'
             const res_ = typeof resolution === 'string' && resolution ? resolution : 'best'
 
             const window = this.getMainWindow()
@@ -73,7 +79,7 @@ export class LocalServer {
               return
             }
 
-            const id = `ext-${Date.now()}`
+            const id = `ext-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
             // Honor the format/resolution sent by the extension, defaulting to best
             this.downloader.download(id, url, fmt, res_, window, title, referer).catch((err) => {
               console.error(`LocalServer download error for ${id}:`, err)

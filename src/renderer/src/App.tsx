@@ -1,19 +1,34 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Download, History, Settings, Trash2, HelpCircle } from 'lucide-react'
+import { Trash2 } from 'lucide-react'
 import { Toaster, toast } from 'sonner'
 import BinaryStatusModal from './components/BinaryStatusModal'
 import DownloadQueue from './components/DownloadQueue'
-import DownloadForm from './components/DownloadForm'
+import PasteBox from './components/PasteBox'
+import MiniView from './components/MiniView'
+import TitleBar, { AppMode, TabId, Theme } from './components/TitleBar'
+import StatusBar from './components/StatusBar'
 import SettingsTab from './components/SettingsTab'
 import HistoryList, { HistoryItem } from './components/HistoryList'
 import { DownloadProgress } from '../../main/downloader'
 import { AppSettings } from './types'
-import { DEFAULT_CONCURRENCY } from './constants'
+import {
+  DEFAULT_CONCURRENCY,
+  MINI_WIDTH_THRESHOLD,
+  isDirectFileUrl,
+  fileNameFromUrl,
+  isTorrentUrl,
+  torrentNameFromUrl
+} from './constants'
 
 export default function App(): React.JSX.Element {
-  const [activeTab, setActiveTab] = useState<'download' | 'history' | 'settings'>('download')
+  const [activeTab, setActiveTab] = useState<TabId>('download')
+  const [dockSide, setDockSide] = useState<'left' | 'right' | null>(null)
+  const [isMiniSize, setIsMiniSize] = useState<boolean>(window.innerWidth < MINI_WIDTH_THRESHOLD)
+  const [theme, setTheme] = useState<Theme>(
+    () => (localStorage.getItem('theme') as Theme) || 'system'
+  )
   const [urlInput, setUrlInput] = useState('')
-  const [format, setFormat] = useState<'mp4' | 'mp3'>('mp4')
+  const [format, setFormat] = useState<'mp4' | 'mp3' | 'file'>('mp4')
   const [resolution, setResolution] = useState<string>('1080')
   const [isFetchingInfo, setIsFetchingInfo] = useState<boolean>(false)
 
@@ -34,6 +49,7 @@ export default function App(): React.JSX.Element {
     downloadDir: '',
     downloadDirVideo: '',
     downloadDirMusic: '',
+    downloadDirFiles: '',
     lastFormat: 'mp4',
     lastResolution: '1080',
     proxy: '',
@@ -52,6 +68,99 @@ export default function App(): React.JSX.Element {
   const [ytdlpUpdatePercent, setYtdlpUpdatePercent] = useState<number>(0)
 
   const hasOngoingDownloads = queue.some((item) => ['downloading', 'merging'].includes(item.status))
+  const activeCount = queue.filter((item) =>
+    ['downloading', 'merging'].includes(item.status)
+  ).length
+
+  const mode: AppMode = dockSide ? 'dock' : isMiniSize ? 'mini' : 'full'
+
+  // Apply light/dark theme to the document root
+  useEffect(() => {
+    localStorage.setItem('theme', theme)
+    const mql = window.matchMedia('(prefers-color-scheme: dark)')
+    const apply = (): void => {
+      const dark = theme === 'dark' || (theme === 'system' && mql.matches)
+      document.documentElement.classList.toggle('dark', dark)
+    }
+    apply()
+    mql.addEventListener('change', apply)
+    return () => mql.removeEventListener('change', apply)
+  }, [theme])
+
+  const cycleTheme = (): void => {
+    setTheme((prev) => (prev === 'system' ? 'light' : prev === 'light' ? 'dark' : 'system'))
+  }
+
+  // Switch to mini mode when the window is resized small
+  useEffect(() => {
+    const onResize = (): void => setIsMiniSize(window.innerWidth < MINI_WIDTH_THRESHOLD)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  // Global paste: pasting a link anywhere (outside an input) adds it to the queue
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent): void => {
+      const target = e.target as HTMLElement | null
+      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+      const text = e.clipboardData?.getData('text')?.trim()
+      if (
+        text &&
+        (text.startsWith('http://') || text.startsWith('https://') || text.startsWith('magnet:'))
+      ) {
+        setUrlInput(text)
+      }
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [])
+
+  // Global drop: accept .torrent files dropped anywhere in the window, and
+  // stop Electron from navigating to the dropped file
+  useEffect(() => {
+    const onDragOver = (e: DragEvent): void => {
+      e.preventDefault()
+    }
+    const onDrop = (e: DragEvent): void => {
+      e.preventDefault()
+      const file = e.dataTransfer?.files?.[0]
+      if (file && file.name.toLowerCase().endsWith('.torrent')) {
+        const filePath = window.api?.getFilePath ? window.api.getFilePath(file) : file.name
+        if (filePath) {
+          setUrlInput(filePath)
+        }
+      }
+    }
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('drop', onDrop)
+    return () => {
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('drop', onDrop)
+    }
+  }, [])
+
+  const handleDock = async (side: 'left' | 'right' | null): Promise<void> => {
+    if (window.api?.setDockMode) {
+      await window.api.setDockMode(side)
+    }
+    setDockSide(side)
+  }
+
+  const handleExpandWindow = (): void => {
+    if (window.api?.windowExpand) {
+      window.api.windowExpand()
+    } else {
+      setIsMiniSize(false)
+    }
+  }
+
+  const handleMiniMode = (): void => {
+    if (window.api?.windowSetMini) {
+      window.api.windowSetMini()
+    } else {
+      setIsMiniSize(true)
+    }
+  }
 
   // Load configuration and check binary health on mount
   useEffect(() => {
@@ -85,8 +194,6 @@ export default function App(): React.JSX.Element {
             } else {
               if (data.status === 'failed') {
                 toast.error('Download failed. Check details in history.')
-              } else if (data.status === 'cancelled') {
-                toast.warning('Download cancelled.')
               }
               loadAppSettings()
               return prevQueue.map((item) =>
@@ -164,9 +271,7 @@ export default function App(): React.JSX.Element {
         )
       } catch (err) {
         console.error('Failed to fetch file size:', err)
-        setQueue((prev) =>
-          prev.map((q) => (q.id === item.id ? { ...q, fileSize: 'Unknown' } : q))
-        )
+        setQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, fileSize: 'Unknown' } : q)))
       }
     })
   }, [queue])
@@ -174,7 +279,13 @@ export default function App(): React.JSX.Element {
   // Dynamically fetch video info when the URL changes
   useEffect(() => {
     const trimmed = urlInput.trim()
-    if (!trimmed || (!trimmed.startsWith('http://') && !trimmed.startsWith('https://'))) {
+    if (
+      !trimmed ||
+      (!trimmed.startsWith('http://') &&
+        !trimmed.startsWith('https://') &&
+        !trimmed.startsWith('magnet:') &&
+        !trimmed.toLowerCase().endsWith('.torrent'))
+    ) {
       return
     }
 
@@ -183,7 +294,47 @@ export default function App(): React.JSX.Element {
       try {
         const timestamp = Date.now()
         const formatToUse = formatRef.current
-        const resToUse = formatToUse === 'mp3' ? 'best' : resolutionRef.current
+        const resToUse = formatToUse === 'mp4' ? resolutionRef.current : 'best'
+
+        // Magnet links and .torrent URLs go to the torrent engine
+        if (isTorrentUrl(trimmed)) {
+          const name = torrentNameFromUrl(trimmed)
+          const torrentItem: DownloadProgress = {
+            id: `${timestamp}-0`,
+            percent: 0,
+            speed: '',
+            eta: '',
+            status: 'ready',
+            url: trimmed,
+            format: 'torrent',
+            resolution: 'best',
+            title: name,
+            fileName: name
+          }
+          setQueue((prev) => [...prev, torrentItem])
+          setUrlInput('')
+          return
+        }
+
+        // Direct file links skip yt-dlp entirely — queue them as plain downloads
+        if (formatToUse === 'file' || isDirectFileUrl(trimmed)) {
+          const name = fileNameFromUrl(trimmed) || 'Direct file'
+          const fileItem: DownloadProgress = {
+            id: `${timestamp}-0`,
+            percent: 0,
+            speed: '',
+            eta: '',
+            status: 'ready',
+            url: trimmed,
+            format: 'file',
+            resolution: 'best',
+            title: name,
+            fileName: name
+          }
+          setQueue((prev) => [...prev, fileItem])
+          setUrlInput('')
+          return
+        }
 
         if (window.api && window.api.getVideoInfo) {
           const infos = await window.api.getVideoInfo(trimmed)
@@ -210,12 +361,6 @@ export default function App(): React.JSX.Element {
 
           setQueue((prev) => [...prev, ...newItems])
           setUrlInput('')
-
-          if (newItems.length > 1) {
-            toast.success(`Added ${newItems.length} videos from playlist to queue!`)
-          } else {
-            toast.success('Added video to download queue!')
-          }
         } else {
           // Simulated Preview in Browser Preview
           const isPlaylist = trimmed.includes('list=') && !trimmed.includes('v=')
@@ -258,7 +403,6 @@ export default function App(): React.JSX.Element {
               }
             ]
             setQueue((prev) => [...prev, ...newItems])
-            toast.success(`Added ${newItems.length} videos from playlist to queue!`)
           } else {
             const newItem: DownloadProgress = {
               id: `${timestamp}-0`,
@@ -278,7 +422,6 @@ export default function App(): React.JSX.Element {
                 (formatToUse === 'mp3' ? '.mp3' : '.mp4')
             }
             setQueue((prev) => [...prev, newItem])
-            toast.success('Added video to download queue!')
           }
           setUrlInput('')
         }
@@ -315,15 +458,17 @@ export default function App(): React.JSX.Element {
     }
   }, [queue, settings.maxConcurrentDownloads])
 
-  const handleFormatChange = async (newFormat: 'mp4' | 'mp3'): Promise<void> => {
+  const handleFormatChange = async (newFormat: 'mp4' | 'mp3' | 'file'): Promise<void> => {
     setFormat(newFormat)
     if (window.api) {
       const updated = await window.api.updateSettings({ lastFormat: newFormat })
       setSettings(updated)
     }
+    // File mode only affects new pastes; parsed video items keep their format
+    if (newFormat === 'file') return
     setQueue((prev) =>
       prev.map((item) =>
-        item.status === 'ready'
+        item.status === 'ready' && item.format !== 'file' && item.format !== 'torrent'
           ? {
               ...item,
               format: newFormat,
@@ -342,7 +487,7 @@ export default function App(): React.JSX.Element {
     }
     setQueue((prev) =>
       prev.map((item) =>
-        item.status === 'ready'
+        item.status === 'ready' && item.format !== 'file' && item.format !== 'torrent'
           ? {
               ...item,
               resolution: newRes
@@ -359,7 +504,6 @@ export default function App(): React.JSX.Element {
     } else {
       setSettings((prev) => ({ ...prev, maxConcurrentDownloads: limit }))
     }
-    toast.success(`Concurrency limit set to ${limit}`)
   }
 
   const checkBinaryStatus = async (): Promise<void> => {
@@ -379,6 +523,7 @@ export default function App(): React.JSX.Element {
           downloadDir: prev.downloadDir || 'C:\\Users\\User\\Downloads',
           downloadDirVideo: prev.downloadDirVideo || 'C:\\Users\\User\\Downloads\\Video',
           downloadDirMusic: prev.downloadDirMusic || 'C:\\Users\\User\\Downloads\\Music',
+          downloadDirFiles: prev.downloadDirFiles || 'C:\\Users\\User\\Downloads\\Files',
           lastFormat: prev.lastFormat || 'mp4',
           lastResolution: prev.lastResolution || '1080',
           proxy: prev.proxy || '',
@@ -425,12 +570,6 @@ export default function App(): React.JSX.Element {
           latest: '2024.05.27',
           updateAvailable: true
         })
-        toast.info(
-          'Simulated: A new yt-dlp update is available (2024.05.27). Update it in Settings!',
-          {
-            duration: 10000
-          }
-        )
         setIsCheckingUpdates(false)
       }, 1000)
       return
@@ -439,11 +578,6 @@ export default function App(): React.JSX.Element {
     try {
       const res = await window.api.checkYtdlUpdates()
       setYtdlVersionInfo(res)
-      if (res.updateAvailable) {
-        toast.info(`A new yt-dlp update is available (${res.latest}). Update it in Settings!`, {
-          duration: 10000
-        })
-      }
     } catch (err) {
       console.error('Failed to check for updates:', err)
     } finally {
@@ -453,7 +587,6 @@ export default function App(): React.JSX.Element {
 
   const handleUpdateYtdlp = async (): Promise<void> => {
     if (!window.api) {
-      toast.info('Simulating update in web preview...')
       setIsUpdatingYtdlp(true)
       setYtdlpUpdatePercent(0)
       const interval = setInterval(() => {
@@ -494,7 +627,7 @@ export default function App(): React.JSX.Element {
   const startDownloadProcess = async (
     id: string,
     url: string,
-    format: 'mp4' | 'mp3' | 'best',
+    format: 'mp4' | 'mp3' | 'best' | 'file' | 'torrent',
     resolution: string,
     title?: string
   ): Promise<void> => {
@@ -515,7 +648,6 @@ export default function App(): React.JSX.Element {
 
     if (!window.api) {
       // Browser Demo: Simulate download
-      toast.info('Starting simulated download in web preview...')
       let currentPercent = 0
       const interval = setInterval(() => {
         currentPercent += 10
@@ -580,7 +712,7 @@ export default function App(): React.JSX.Element {
   const handleQueueDownload = async (
     id: string,
     url: string,
-    format: 'mp4' | 'mp3' | 'best',
+    format: 'mp4' | 'mp3' | 'best' | 'file' | 'torrent',
     resolution: string
   ): Promise<void> => {
     setQueue((prev) =>
@@ -605,7 +737,6 @@ export default function App(): React.JSX.Element {
     const readyItems = queue.filter((item) => item.status === 'ready')
     if (readyItems.length === 0) return
 
-    toast.info(`Queued ${readyItems.length} downloads...`)
     setQueue((prev) =>
       prev.map((item) =>
         item.status === 'ready'
@@ -644,7 +775,6 @@ export default function App(): React.JSX.Element {
             : q
         )
       )
-      toast.info('Removed from download queue.')
       return
     }
 
@@ -667,10 +797,42 @@ export default function App(): React.JSX.Element {
             : q
         )
       )
-      toast.warning('Simulated download cancelled.')
       return
     }
     await window.api.cancelDownload(id)
+  }
+
+  const handlePauseDownload = async (id: string): Promise<void> => {
+    if (!window.api) {
+      // Browser demo: freeze the simulated download in place
+      const interval = (window as any)[`sim-${id}`]
+      if (interval) {
+        clearInterval(interval)
+        delete (window as any)[`sim-${id}`]
+      }
+      setQueue((prev) =>
+        prev.map((q) => (q.id === id ? { ...q, status: 'paused', speed: 'Paused', eta: '' } : q))
+      )
+      return
+    }
+    await window.api.pauseDownload(id)
+  }
+
+  const handleResumeDownload = (id: string): void => {
+    // Re-queue it; the concurrency worker restarts the download and aria2
+    // resumes from its .aria2 control file
+    setQueue((prev) =>
+      prev.map((q) =>
+        q.id === id
+          ? {
+              ...q,
+              status: 'queued',
+              speed: 'Queued...',
+              eta: '--:--'
+            }
+          : q
+      )
+    )
   }
 
   const handleCancelAllDownloads = async (): Promise<void> => {
@@ -679,8 +841,6 @@ export default function App(): React.JSX.Element {
     )
 
     if (activeAndQueued.length === 0) return
-
-    toast.warning(`Cancelling all ${activeAndQueued.length} downloads...`)
 
     setQueue((prev) =>
       prev.map((item) => {
@@ -724,7 +884,6 @@ export default function App(): React.JSX.Element {
     const activeItems = queue.filter((item) => ['downloading', 'merging'].includes(item.status))
 
     if (activeItems.length > 0) {
-      toast.warning(`Cancelling and clearing all ${queue.length} downloads...`)
       if (window.api) {
         for (const item of activeItems) {
           await window.api.cancelDownload(item.id)
@@ -738,8 +897,6 @@ export default function App(): React.JSX.Element {
           }
         }
       }
-    } else {
-      toast.info('Downloads queue cleared.')
     }
 
     setQueue([])
@@ -753,7 +910,11 @@ export default function App(): React.JSX.Element {
               ...item,
               format: newFormat,
               resolution:
-                newFormat === 'mp3' ? 'best' : item.resolution === 'best' ? '1080' : item.resolution,
+                newFormat === 'mp3'
+                  ? 'best'
+                  : item.resolution === 'best'
+                    ? '1080'
+                    : item.resolution,
               fileSize: undefined
             }
           : item
@@ -777,7 +938,6 @@ export default function App(): React.JSX.Element {
 
   const handlePlayFile = async (filePath: string): Promise<void> => {
     if (!window.api) {
-      toast.info(`Simulating media playback for: ${filePath}`)
       return
     }
     const opened = await window.api.playFile(filePath)
@@ -788,7 +948,6 @@ export default function App(): React.JSX.Element {
 
   const handleShowInFolder = async (filePath: string): Promise<void> => {
     if (!window.api) {
-      toast.info(`Simulating folder location: ${filePath}`)
       return
     }
     const revealed = await window.api.showInFolder(filePath)
@@ -797,21 +956,22 @@ export default function App(): React.JSX.Element {
     }
   }
 
-  const handleSelectDownloadDir = async (type: 'video' | 'music'): Promise<void> => {
-    const key = type === 'video' ? 'downloadDirVideo' : 'downloadDirMusic'
+  const handleSelectDownloadDir = async (type: 'video' | 'music' | 'files'): Promise<void> => {
+    const key =
+      type === 'video' ? 'downloadDirVideo' : type === 'music' ? 'downloadDirMusic' : 'downloadDirFiles'
     if (!window.api) {
       setSettings((prev) => ({
         ...prev,
-        [key]: `C:\\Users\\User\\CustomDownloads\\${type === 'video' ? 'Video' : 'Music'}`
+        [key]: `C:\\Users\\User\\CustomDownloads\\${
+          type === 'video' ? 'Video' : type === 'music' ? 'Music' : 'Files'
+        }`
       }))
-      toast.success(`Simulated ${type === 'video' ? 'Video' : 'Music'} download directory updated`)
       return
     }
     const selectedPath = await window.api.selectDownloadDir()
     if (selectedPath) {
       const updated = await window.api.updateSettings({ [key]: selectedPath })
       setSettings(updated)
-      toast.success(`${type === 'video' ? 'Video' : 'Music'} download directory updated`)
     }
   }
 
@@ -822,7 +982,6 @@ export default function App(): React.JSX.Element {
         ...prev,
         proxy: value
       }))
-      toast.success('Simulated proxy configuration saved')
       return
     }
     if (value !== settings.proxy) {
@@ -838,21 +997,35 @@ export default function App(): React.JSX.Element {
         ...prev,
         history: []
       }))
-      toast.success('Simulated history cleared')
       return
     }
     const updated = await window.api.clearHistory()
     setSettings(updated)
-    toast.success('History cleared successfully')
   }
+
+  // Subtle notifications: bottom corner, neutral colors, short-lived
+  const toaster = (
+    <Toaster
+      position="bottom-right"
+      theme={theme}
+      duration={2500}
+      gap={6}
+      toastOptions={{
+        style: { fontSize: '12px', padding: '10px 14px', borderRadius: '12px' }
+      }}
+    />
+  )
 
   // Render loading screen while binary checks compile
   if (needsSetup === null) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-apple-bg-light dark:bg-apple-bg-dark text-apple-text-light dark:text-apple-text-dark">
-        <div className="flex flex-col items-center">
-          <div className="w-10 h-10 border-4 border-apple-blue border-t-transparent rounded-full animate-spin"></div>
-          <span className="text-sm font-medium mt-4 opacity-80">Launching Application...</span>
+      <div className="flex flex-col h-screen w-screen bg-apple-bg-light dark:bg-apple-bg-dark text-apple-text-light dark:text-apple-text-dark overflow-hidden">
+        <TitleBar mode="full" />
+        <div className="flex-1 flex items-center justify-center">
+          <div className="flex flex-col items-center">
+            <div className="w-10 h-10 border-4 border-apple-blue border-t-transparent rounded-full animate-spin"></div>
+            <span className="text-sm font-medium mt-4 opacity-80">Launching Application...</span>
+          </div>
         </div>
       </div>
     )
@@ -861,98 +1034,99 @@ export default function App(): React.JSX.Element {
   // Render Binary installer modal if requirements are missing
   if (needsSetup) {
     return (
-      <>
-        <Toaster position="top-right" richColors />
-        <BinaryStatusModal onComplete={() => setNeedsSetup(false)} />
-      </>
+      <div className="flex flex-col h-screen w-screen bg-apple-bg-light dark:bg-apple-bg-dark overflow-hidden">
+        {toaster}
+        <TitleBar mode="full" />
+        <div className="flex-1 overflow-y-auto">
+          <BinaryStatusModal onComplete={() => setNeedsSetup(false)} />
+        </div>
+      </div>
     )
   }
 
   return (
-    <div className="flex h-screen w-screen bg-apple-bg-light dark:bg-apple-bg-dark text-apple-text-light dark:text-apple-text-dark overflow-hidden font-sans">
-      <Toaster position="top-right" richColors />
+    <div className="flex flex-col h-screen w-screen bg-apple-bg-light dark:bg-apple-bg-dark text-apple-text-light dark:text-apple-text-dark overflow-hidden font-sans">
+      {toaster}
 
-      {/* Sidebar Navigation */}
-      <aside className="w-64 bg-apple-card-light dark:bg-apple-card-dark border-r border-apple-border-light dark:border-apple-border-dark flex flex-col justify-between p-5">
-        <div className="space-y-6">
-          {/* Logo / App Name */}
-          <div className="flex items-center space-x-3 px-2">
-            <div className="w-8 h-8 rounded-lg bg-apple-blue flex items-center justify-center shadow-md">
-              <Download className="w-4 h-4 text-white" />
-            </div>
-            <span className="font-semibold text-base tracking-tight text-apple-text-light dark:text-apple-text-dark">
-              Media Downloader
-            </span>
-          </div>
+      <TitleBar
+        mode={mode}
+        activeTab={activeTab}
+        onTabChange={mode === 'full' ? setActiveTab : undefined}
+        activeCount={activeCount}
+        dockSide={dockSide}
+        onDock={handleDock}
+        onExpand={handleExpandWindow}
+        onMini={handleMiniMode}
+        theme={theme}
+        onCycleTheme={cycleTheme}
+      />
 
-          {/* Navigation Links */}
-          <nav className="space-y-1">
-            <button
-              onClick={() => setActiveTab('download')}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
-                activeTab === 'download'
-                  ? 'bg-apple-blue text-white shadow-sm'
-                  : 'text-apple-text-secondary-light dark:text-apple-text-secondary-dark hover:bg-apple-gray-bg-light dark:hover:bg-apple-gray-bg-dark hover:text-apple-text-light dark:hover:text-apple-text-dark'
-              }`}
-            >
-              <Download className="w-4 h-4" />
-              <span>Download</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('history')}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
-                activeTab === 'history'
-                  ? 'bg-apple-blue text-white shadow-sm'
-                  : 'text-apple-text-secondary-light dark:text-apple-text-secondary-dark hover:bg-apple-gray-bg-light dark:hover:bg-apple-gray-bg-dark hover:text-apple-text-light dark:hover:text-apple-text-dark'
-              }`}
-            >
-              <History className="w-4 h-4" />
-              <span>History</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('settings')}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
-                activeTab === 'settings'
-                  ? 'bg-apple-blue text-white shadow-sm'
-                  : 'text-apple-text-secondary-light dark:text-apple-text-secondary-dark hover:bg-apple-gray-bg-light dark:hover:bg-apple-gray-bg-dark hover:text-apple-text-light dark:hover:text-apple-text-dark'
-              }`}
-            >
-              <Settings className="w-4 h-4" />
-              <span>Settings</span>
-            </button>
-          </nav>
+      {/* Mini mode: paste box + slim progress rows only */}
+      {mode === 'mini' && (
+        <MiniView
+          queue={queue}
+          urlInput={urlInput}
+          onUrlInputChange={setUrlInput}
+          isFetchingInfo={isFetchingInfo}
+          format={format}
+          onFormatChange={handleFormatChange}
+          resolution={resolution}
+          onResolutionChange={handleResolutionChange}
+          onStart={handleQueueDownload}
+          onStartAll={handleStartAllDownloads}
+          onCancel={handleCancelDownload}
+          onPause={handlePauseDownload}
+          onResume={handleResumeDownload}
+        />
+      )}
+
+      {/* Dock mode: narrow vertical queue panel */}
+      {mode === 'dock' && (
+        <div className="flex-1 overflow-y-auto p-3 space-y-3">
+          <PasteBox
+            urlInput={urlInput}
+            onUrlInputChange={setUrlInput}
+            isFetchingInfo={isFetchingInfo}
+            format={format}
+            onFormatChange={handleFormatChange}
+            resolution={resolution}
+            onResolutionChange={handleResolutionChange}
+            compact
+          />
+          <DownloadQueue
+            queue={queue}
+            onCancel={handleCancelDownload}
+            onStart={handleQueueDownload}
+            onStartAll={handleStartAllDownloads}
+            onCancelAll={handleCancelAllDownloads}
+            onClearAll={handleClearAllQueue}
+            onUpdateFormat={handleUpdateQueueItemFormat}
+            onUpdateResolution={handleUpdateQueueItemResolution}
+            onPause={handlePauseDownload}
+            onResume={handleResumeDownload}
+            maxConcurrentDownloads={settings.maxConcurrentDownloads || DEFAULT_CONCURRENCY}
+            onUpdateConcurrencyLimit={handleConcurrencyChange}
+            compact
+          />
         </div>
+      )}
 
-        {/* Footer Info */}
-        <div className="flex items-center space-x-2 px-2 text-xs text-apple-text-secondary-light/60 dark:text-apple-text-secondary-dark/60">
-          <HelpCircle className="w-3.5 h-3.5" />
-          <span>v1.0.2 • yt-dlp Wrapper</span>
-        </div>
-      </aside>
+      {/* Full mode: tabbed layout */}
+      {mode === 'full' && (
+        <main className="flex-1 min-h-0 overflow-y-auto">
+          <div className="p-6 max-w-4xl w-full mx-auto">
+            {activeTab === 'download' && (
+              <div className="space-y-6">
+                <PasteBox
+                  urlInput={urlInput}
+                  onUrlInputChange={setUrlInput}
+                  isFetchingInfo={isFetchingInfo}
+                  format={format}
+                  onFormatChange={handleFormatChange}
+                  resolution={resolution}
+                  onResolutionChange={handleResolutionChange}
+                />
 
-      {/* Main Content Area */}
-      <main className="flex-1 flex flex-col min-w-0 overflow-y-auto">
-        <header className="h-16 border-b border-apple-border-light dark:border-apple-border-dark flex items-center px-8 bg-apple-card-light/40 dark:bg-apple-card-dark/40 backdrop-blur-md sticky top-0 z-10">
-          <h1 className="text-lg font-semibold text-apple-text-light dark:text-apple-text-dark capitalize">
-            {activeTab === 'download' ? 'Video Downloader' : activeTab}
-          </h1>
-        </header>
-
-        <div className="flex-1 p-8 max-w-4xl w-full mx-auto">
-          {activeTab === 'download' && (
-            <div className="space-y-8">
-              <DownloadForm
-                urlInput={urlInput}
-                onUrlInputChange={setUrlInput}
-                isFetchingInfo={isFetchingInfo}
-                format={format}
-                onFormatChange={handleFormatChange}
-                resolution={resolution}
-                onResolutionChange={handleResolutionChange}
-              />
-
-              {/* Active Downloads List */}
-              <div className="pt-4 border-t border-apple-border-light dark:border-apple-border-dark">
                 <DownloadQueue
                   queue={queue}
                   onCancel={handleCancelDownload}
@@ -962,54 +1136,64 @@ export default function App(): React.JSX.Element {
                   onClearAll={handleClearAllQueue}
                   onUpdateFormat={handleUpdateQueueItemFormat}
                   onUpdateResolution={handleUpdateQueueItemResolution}
+                  onPause={handlePauseDownload}
+                  onResume={handleResumeDownload}
                   maxConcurrentDownloads={settings.maxConcurrentDownloads || DEFAULT_CONCURRENCY}
                   onUpdateConcurrencyLimit={handleConcurrencyChange}
                 />
               </div>
-            </div>
-          )}
+            )}
 
-          {activeTab === 'history' && (
-            <div className="space-y-4">
-              <div className="flex justify-between items-center px-1">
-                <p className="text-xs text-apple-text-secondary-light dark:text-apple-text-secondary-dark">
-                  Your downloaded media files history log
-                </p>
-                {settings.history.length > 0 && (
-                  <button
-                    onClick={handleClearHistory}
-                    className="flex items-center space-x-1.5 text-xs text-red-500 hover:text-red-600 font-medium transition-colors"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    <span>Clear All</span>
-                  </button>
-                )}
+            {activeTab === 'history' && (
+              <div className="space-y-4">
+                <div className="flex justify-between items-center px-1">
+                  <p className="text-xs text-apple-text-secondary-light dark:text-apple-text-secondary-dark">
+                    Your downloaded media files history log
+                  </p>
+                  {settings.history.length > 0 && (
+                    <button
+                      onClick={handleClearHistory}
+                      className="flex items-center space-x-1.5 text-xs text-red-500 hover:text-red-600 font-medium transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Clear All</span>
+                    </button>
+                  )}
+                </div>
+                <HistoryList
+                  history={settings.history}
+                  onPlay={handlePlayFile}
+                  onShowInFolder={handleShowInFolder}
+                />
               </div>
-              <HistoryList
-                history={settings.history}
-                onPlay={handlePlayFile}
-                onShowInFolder={handleShowInFolder}
-              />
-            </div>
-          )}
+            )}
 
-          {activeTab === 'settings' && (
-            <SettingsTab
-              settings={settings}
-              hasOngoingDownloads={hasOngoingDownloads}
-              onSelectDownloadDir={handleSelectDownloadDir}
-              onConcurrencyChange={handleConcurrencyChange}
-              ytdlVersionInfo={ytdlVersionInfo}
-              isCheckingUpdates={isCheckingUpdates}
-              isUpdatingYtdlp={isUpdatingYtdlp}
-              ytdlpUpdatePercent={ytdlpUpdatePercent}
-              onCheckUpdates={triggerUpdateCheck}
-              onUpdateYtdlp={handleUpdateYtdlp}
-              onProxyUpdate={handleProxyUpdate}
-            />
-          )}
-        </div>
-      </main>
+            {activeTab === 'settings' && (
+              <SettingsTab
+                settings={settings}
+                hasOngoingDownloads={hasOngoingDownloads}
+                onSelectDownloadDir={handleSelectDownloadDir}
+                onConcurrencyChange={handleConcurrencyChange}
+                ytdlVersionInfo={ytdlVersionInfo}
+                isCheckingUpdates={isCheckingUpdates}
+                isUpdatingYtdlp={isUpdatingYtdlp}
+                ytdlpUpdatePercent={ytdlpUpdatePercent}
+                onCheckUpdates={triggerUpdateCheck}
+                onUpdateYtdlp={handleUpdateYtdlp}
+                onProxyUpdate={handleProxyUpdate}
+              />
+            )}
+          </div>
+        </main>
+      )}
+
+      <StatusBar
+        queue={queue}
+        ytdlVersionInfo={ytdlVersionInfo}
+        isCheckingUpdates={isCheckingUpdates}
+        onGoToSettings={mode === 'full' ? () => setActiveTab('settings') : undefined}
+        compact={mode !== 'full'}
+      />
     </div>
   )
 }

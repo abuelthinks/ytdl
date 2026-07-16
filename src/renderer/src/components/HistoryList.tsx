@@ -1,5 +1,5 @@
 import React from 'react'
-import { FolderOpen, Play, Film, Music, AlertCircle, Sparkles } from 'lucide-react'
+import { FolderOpen, Play, Film, Music, FileDown, AlertCircle, Sparkles } from 'lucide-react'
 
 export interface HistoryItem {
   id: string
@@ -9,8 +9,8 @@ export interface HistoryItem {
   filePath: string
   fileSize: string
   date: string
-  format: 'mp4' | 'mp3' | 'best'
-  status: 'completed' | 'failed' | 'downloading'
+  format: 'mp4' | 'mp3' | 'best' | 'file' | 'torrent'
+  status: 'completed' | 'failed' | 'downloading' | 'paused'
 }
 
 interface HistoryListProps {
@@ -24,8 +24,10 @@ export default function HistoryList({
   onPlay,
   onShowInFolder
 }: HistoryListProps): React.JSX.Element {
-  // Filter out items that are still downloading/active since they belong in the queue
-  const completedHistory = history.filter((item) => item.status !== 'downloading')
+  // Filter out items that are still downloading/paused since they belong in the queue
+  const completedHistory = history.filter(
+    (item) => item.status === 'completed' || item.status === 'failed'
+  )
 
   if (completedHistory.length === 0) {
     return (
@@ -45,6 +47,7 @@ export default function HistoryList({
     <div className="space-y-3">
       {completedHistory.map((item) => {
         const isAudio = item.format === 'mp3'
+        const isFile = item.format === 'file' || item.format === 'torrent'
         const isSuccess = item.status === 'completed'
 
         return (
@@ -60,13 +63,17 @@ export default function HistoryList({
                     ? 'bg-red-500/10 text-red-500'
                     : isAudio
                       ? 'bg-amber-500/10 text-amber-500'
-                      : 'bg-apple-blue/10 text-apple-blue'
+                      : isFile
+                        ? 'bg-purple-500/10 text-purple-500'
+                        : 'bg-apple-blue/10 text-apple-blue'
                 }`}
               >
                 {!isSuccess ? (
                   <AlertCircle className="w-5 h-5" />
                 ) : isAudio ? (
                   <Music className="w-5 h-5" />
+                ) : isFile ? (
+                  <FileDown className="w-5 h-5" />
                 ) : (
                   <Film className="w-5 h-5" />
                 )}
