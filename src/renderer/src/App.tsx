@@ -193,7 +193,11 @@ export default function App(): React.JSX.Element {
               return prevQueue.filter((item) => item.id !== data.id)
             } else {
               if (data.status === 'failed') {
-                toast.error('Download failed. Check details in history.')
+                toast.error(
+                  data.error
+                    ? `Download failed: ${data.error}`
+                    : 'Download failed. Check details in history.'
+                )
               }
               loadAppSettings()
               return prevQueue.map((item) =>
@@ -958,7 +962,11 @@ export default function App(): React.JSX.Element {
 
   const handleSelectDownloadDir = async (type: 'video' | 'music' | 'files'): Promise<void> => {
     const key =
-      type === 'video' ? 'downloadDirVideo' : type === 'music' ? 'downloadDirMusic' : 'downloadDirFiles'
+      type === 'video'
+        ? 'downloadDirVideo'
+        : type === 'music'
+          ? 'downloadDirMusic'
+          : 'downloadDirFiles'
     if (!window.api) {
       setSettings((prev) => ({
         ...prev,

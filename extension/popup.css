@@ -219,6 +219,21 @@ body {
   color: var(--color-danger);
 }
 
+.handoff-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.handoff-toggle input {
+  accent-color: var(--color-accent);
+  margin: 0;
+  cursor: pointer;
+}
+
 .description {
   font-size: 11px;
   line-height: 1.5;

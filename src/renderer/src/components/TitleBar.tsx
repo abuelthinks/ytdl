@@ -81,7 +81,7 @@ export default function TitleBar({
         </div>
         {mode === 'full' && (
           <span className="text-xs font-semibold tracking-tight text-apple-text-light dark:text-apple-text-dark whitespace-nowrap">
-            Media Downloader
+            MyIDM
           </span>
         )}
         {mode === 'mini' && (

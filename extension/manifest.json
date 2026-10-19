@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "YTDL Desktop Helper",
-  "version": "1.4.1",
-  "description": "Send any video page to your YTDL Desktop App — a one-click download button appears on any page with a video player.",
-  "permissions": ["activeTab"],
-  "host_permissions": ["http://127.0.0.1:30123/*", "http://localhost:30123/*"],
+  "name": "MyIDM Helper",
+  "version": "1.7.0",
+  "description": "Send any video page to your MyIDM app — a one-click download button appears on any page with a video player.",
+  "permissions": ["activeTab", "downloads", "storage", "cookies"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
   },

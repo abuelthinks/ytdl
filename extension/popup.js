@@ -4,6 +4,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const downloadBtn = document.getElementById('download-tab-btn')
   const resultText = document.getElementById('action-result')
   const formatToggle = document.getElementById('format-toggle')
+  const handoffToggle = document.getElementById('handoff-toggle')
 
   let connected = false
   let selectedFormat = 'best'
@@ -17,10 +18,10 @@ document.addEventListener('DOMContentLoaded', () => {
     connected = isConnected
     if (isConnected) {
       statusCard.className = 'status-card connected'
-      statusText.textContent = 'Connected to YTDL App'
+      statusText.textContent = 'Connected to MyIDM'
     } else {
       statusCard.className = 'status-card disconnected'
-      statusText.textContent = 'Disconnected — open the YTDL App'
+      statusText.textContent = 'Disconnected — open MyIDM'
     }
     downloadBtn.disabled = !isConnected
   }
@@ -33,6 +34,13 @@ document.addEventListener('DOMContentLoaded', () => {
       renderStatus(false)
     }
   }
+
+  chrome.storage.local.get('handoffDownloads').then(({ handoffDownloads }) => {
+    handoffToggle.checked = !!handoffDownloads
+  })
+  handoffToggle.addEventListener('change', () => {
+    chrome.storage.local.set({ handoffDownloads: handoffToggle.checked })
+  })
 
   formatToggle.addEventListener('click', (e) => {
     const btn = e.target.closest('.fmt-btn')
@@ -83,7 +91,7 @@ document.addEventListener('DOMContentLoaded', () => {
       })
 
       if (res && res.ok && res.result && res.result.success) {
-        setResult('Sent to YTDL App!', 'success')
+        setResult('Sent to MyIDM!', 'success')
       } else {
         const err = (res && (res.error || (res.result && res.result.error))) || 'Unknown error'
         setResult('Failed: ' + err, 'error')

@@ -256,21 +256,23 @@ export default function DownloadQueue({
                             <option value="mp3">MP3</option>
                           </select>
                         )}
-                        {item.format !== 'mp3' && item.format !== 'file' && item.format !== 'torrent' && (
-                          <select
-                            value={item.resolution || '1080'}
-                            onChange={(e) =>
-                              onUpdateResolution && onUpdateResolution(item.id, e.target.value)
-                            }
-                            className={selectStyle}
-                          >
-                            {RESOLUTION_OPTIONS.map((h) => (
-                              <option key={h} value={h}>
-                                {h}p
-                              </option>
-                            ))}
-                          </select>
-                        )}
+                        {item.format !== 'mp3' &&
+                          item.format !== 'file' &&
+                          item.format !== 'torrent' && (
+                            <select
+                              value={item.resolution || '1080'}
+                              onChange={(e) =>
+                                onUpdateResolution && onUpdateResolution(item.id, e.target.value)
+                              }
+                              className={selectStyle}
+                            >
+                              {RESOLUTION_OPTIONS.map((h) => (
+                                <option key={h} value={h}>
+                                  {h}p
+                                </option>
+                              ))}
+                            </select>
+                          )}
                         {item.fileSize === 'Calculating size...' && (
                           <span className="text-[10px] text-apple-text-secondary-light dark:text-apple-text-secondary-dark animate-pulse">
                             Sizing...

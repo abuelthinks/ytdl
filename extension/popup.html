@@ -3,16 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>YTDL Helper</title>
+    <title>MyIDM Helper</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <div class="popup-container">
       <header class="header">
-        <img src="icon.png" alt="YTDL Logo" class="logo" />
+        <img src="icon.png" alt="MyIDM Logo" class="logo" />
         <div class="header-text">
-          <h1>YTDL Desktop Helper</h1>
-          <span class="version">v1.4.1</span>
+          <h1>MyIDM Helper</h1>
+          <span class="version">v1.7.0</span>
         </div>
       </header>
 
@@ -33,9 +33,14 @@
           <p id="action-result" class="action-result"></p>
         </div>
 
+        <label class="handoff-toggle">
+          <input type="checkbox" id="handoff-toggle" />
+          <span>Send all browser downloads to the app</span>
+        </label>
+
         <p class="description">
-          Sends the current tab to your YTDL Desktop App. On any page with a video player, a
-          one-click download button is injected directly into the page.
+          Sends the current tab to your MyIDM app. On any page with a video player, a one-click
+          download button is injected directly into the page.
         </p>
 
         <div class="features-list">
