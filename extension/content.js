@@ -180,7 +180,7 @@ const siteExtractors = [
               const urlMatch = unpacked.match(urlRegex)
 
               if (urlMatch && urlMatch[1]) {
-                console.log('[YTDL Helper] Extracted URL from script:', urlMatch[1])
+                console.log('[MyIDM Helper] Extracted URL from script:', urlMatch[1])
                 return {
                   url: urlMatch[1],
                   title: cleanTitle(),
@@ -189,7 +189,7 @@ const siteExtractors = [
               }
             }
           } catch (err) {
-            console.error('[YTDL Helper] Error parsing packed script:', err)
+            console.error('[MyIDM Helper] Error parsing packed script:', err)
           }
         }
       }
@@ -198,14 +198,14 @@ const siteExtractors = [
       // URL sitting in plain inline JS
       const known = mediaUrlFromResources() || mediaUrlFromScripts()
       if (known) {
-        console.log('[YTDL Helper] Extracted URL from page resources:', known)
+        console.log('[MyIDM Helper] Extracted URL from page resources:', known)
         return { url: known, title: cleanTitle(), referer: window.location.href }
       }
 
       // Strategy 3: kick the player and watch for the stream to surface
       const sniffed = await sniffVideoUrl(10000)
       if (sniffed) {
-        console.log('[YTDL Helper] Extracted URL by sniffing playback:', sniffed)
+        console.log('[MyIDM Helper] Extracted URL by sniffing playback:', sniffed)
         return { url: sniffed, title: cleanTitle(), referer: window.location.href }
       }
 
@@ -248,6 +248,78 @@ const genericExtractor = {
   }
 }
 
+// Keeps the floating button pinned to the top-right of the main video (away from
+// the player's bottom control bar) and only shows it while the pointer is over
+// the video, fading out after a moment of no movement like player controls do.
+function anchorToVideo(container) {
+  let video = null
+  let hideTimer = null
+
+  const setVisible = (visible) => {
+    container.style.opacity = visible ? '1' : '0'
+    container.style.pointerEvents = visible ? 'auto' : 'none'
+  }
+
+  const place = () => {
+    video = pickLargestVideo()
+    const rect = video && video.getBoundingClientRect()
+    if (!rect || rect.width < 120 || rect.height < 68) {
+      container.style.display = 'none'
+      return
+    }
+    container.style.display = 'flex'
+    container.style.top = `${Math.max(rect.top, 0) + 10}px`
+    container.style.right = `${Math.max(window.innerWidth - rect.right, 0) + 10}px`
+  }
+
+  const onPointerMove = (e) => {
+    if (!video) return
+    const rect = video.getBoundingClientRect()
+    const overVideo =
+      e.clientX >= rect.left &&
+      e.clientX <= rect.right &&
+      e.clientY >= rect.top &&
+      e.clientY <= rect.bottom
+    clearTimeout(hideTimer)
+    if (overVideo || container.matches(':hover')) {
+      setVisible(true)
+      hideTimer = setTimeout(() => {
+        if (!container.matches(':hover')) setVisible(false)
+      }, 2500)
+    } else {
+      setVisible(false)
+    }
+  }
+
+  // Fullscreen players hide everything outside the fullscreen element, so move
+  // the button inside it (a bare <video> can't hold children — skip that case)
+  const onFullscreenChange = () => {
+    const fullscreen = document.fullscreenElement
+    const host = fullscreen && fullscreen.tagName !== 'VIDEO' ? fullscreen : document.body
+    if (container.parentNode !== host) host.appendChild(container)
+    place()
+  }
+
+  document.addEventListener('mousemove', onPointerMove, { capture: true, passive: true })
+  document.addEventListener('scroll', place, { capture: true, passive: true })
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+  window.addEventListener('resize', place)
+  // Players resize/relayout without scroll or resize events
+  const layoutTimer = setInterval(() => {
+    if (!container.isConnected) {
+      clearInterval(layoutTimer)
+      document.removeEventListener('mousemove', onPointerMove, { capture: true })
+      document.removeEventListener('scroll', place, { capture: true })
+      document.removeEventListener('fullscreenchange', onFullscreenChange)
+      window.removeEventListener('resize', place)
+      return
+    }
+    place()
+  }, 500)
+
+  place()
+}
+
 function mountButton(extractor, onDownloadClick, onDismiss) {
   if (document.getElementById(BUTTON_CONTAINER_ID)) return null
 
@@ -270,33 +342,43 @@ function mountButton(extractor, onDownloadClick, onDismiss) {
   button.style.cssText = `
     display: flex;
     align-items: center;
-    gap: 8px;
-    background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
-    color: white;
-    border: none;
-    padding: 10px 20px;
-    font-size: 14px;
+    gap: 6px;
+    background: rgba(15, 23, 42, 0.55);
+    color: rgba(255, 255, 255, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 5px 11px;
+    font-size: 11px;
     font-weight: 600;
-    border-radius: 8px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-radius: 999px;
     cursor: pointer;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-    transition: all 0.2s ease;
-    opacity: 0.7;
+    backdrop-filter: blur(6px);
+    transition: opacity 0.15s ease, background 0.15s ease;
+    opacity: 0.6;
   `
   button.disabled = true
+  button.addEventListener('mouseenter', () => {
+    if (button.disabled) return
+    button.style.opacity = '1'
+    button.style.background = 'rgba(15, 23, 42, 0.8)'
+  })
+  button.addEventListener('mouseleave', () => {
+    button.style.opacity = button.disabled ? '0.45' : '0.6'
+    button.style.background = 'rgba(15, 23, 42, 0.55)'
+  })
 
   // Status indicator dot
   const indicator = document.createElement('span')
   indicator.style.cssText = `
-    width: 8px;
-    height: 8px;
+    width: 5px;
+    height: 5px;
     border-radius: 50%;
     background-color: #ef4444;
     display: inline-block;
-    box-shadow: 0 0 8px #ef4444;
   `
 
-  const textNode = document.createTextNode('Checking YTDL App Connection...')
+  const textNode = document.createTextNode('Download')
 
   button.appendChild(indicator)
   button.appendChild(textNode)
@@ -305,18 +387,19 @@ function mountButton(extractor, onDownloadClick, onDismiss) {
   // Small dismiss control so the floating button never gets in the way
   const dismiss = document.createElement('button')
   dismiss.textContent = '✕'
-  dismiss.title = 'Hide YTDL button'
+  dismiss.title = 'Hide download button'
   dismiss.style.cssText = `
-    background: rgba(15, 23, 42, 0.75);
-    color: #cbd5e1;
+    background: rgba(15, 23, 42, 0.45);
+    color: rgba(255, 255, 255, 0.6);
     border: none;
-    width: 22px;
-    height: 22px;
+    width: 18px;
+    height: 18px;
     border-radius: 50%;
-    font-size: 10px;
+    font-size: 9px;
     line-height: 1;
     cursor: pointer;
     flex-shrink: 0;
+    opacity: 0.6;
   `
   dismiss.addEventListener('click', () => {
     container.remove()
@@ -325,18 +408,20 @@ function mountButton(extractor, onDownloadClick, onDismiss) {
   container.appendChild(dismiss)
 
   if (!target || !target.parentNode) {
-    // Floating style when the page has no known container to anchor to
+    // No known container: ride along the video's top-right corner instead
     container.style.cssText = `
       position: fixed;
-      bottom: 20px;
-      right: 20px;
       z-index: 2147483647;
       display: flex;
       align-items: center;
       gap: 6px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     `
     document.body.appendChild(container)
+    anchorToVideo(container)
   } else {
     // Insert right after the target element
     target.parentNode.insertBefore(container, target.nextSibling)
@@ -348,32 +433,23 @@ function mountButton(extractor, onDownloadClick, onDismiss) {
   return {
     updateStatus: (isConnected) => {
       button.disabled = !isConnected
-      if (isConnected) {
-        button.style.opacity = '1'
-        button.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
-        indicator.style.backgroundColor = '#10b981'
-        indicator.style.boxShadow = '0 0 8px #10b981'
-        textNode.textContent = 'Download in YTDL App'
-      } else {
-        button.style.opacity = '0.7'
-        button.style.background = 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)'
-        indicator.style.backgroundColor = '#ef4444'
-        indicator.style.boxShadow = '0 0 8px #ef4444'
-        textNode.textContent = 'Open YTDL App to Download'
-      }
+      button.style.opacity = isConnected ? '0.6' : '0.45'
+      button.style.cursor = isConnected ? 'pointer' : 'default'
+      button.title = isConnected ? 'Download in MyIDM' : 'Open MyIDM to download'
+      indicator.style.backgroundColor = isConnected ? '#10b981' : '#ef4444'
+      textNode.textContent = 'Download'
     },
     updateLoading: (message) => {
       button.disabled = true
       button.style.opacity = '0.8'
       indicator.style.backgroundColor = '#f59e0b'
-      indicator.style.boxShadow = '0 0 8px #f59e0b'
       textNode.textContent = message || 'Processing...'
     }
   }
 }
 
 function start(extractor) {
-  console.log('[YTDL Helper] Active extractor:', extractor.name)
+  console.log('[MyIDM Helper] Active extractor:', extractor.name)
 
   let controls = null
   let serverConnected = false
@@ -411,7 +487,7 @@ function start(extractor) {
     }
 
     if (controls) {
-      controls.updateLoading('Sending to YTDL App...')
+      controls.updateLoading('Sending to MyIDM...')
     }
 
     try {
@@ -432,7 +508,7 @@ function start(extractor) {
         if (controls) controls.updateStatus(serverConnected)
       }
     } catch (err) {
-      alert('Error sending command to YTDL App: ' + err.message)
+      alert('Error sending command to MyIDM: ' + err.message)
       if (controls) controls.updateStatus(serverConnected)
     }
   }

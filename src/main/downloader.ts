@@ -3,9 +3,18 @@ import http from 'http'
 import https from 'https'
 import path from 'path'
 import fs from 'fs'
+import os from 'os'
 import { BinaryManager } from './binaries'
 import { SettingsManager, HistoryItem } from './settings'
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, ClientRequest } from 'electron'
+import {
+  BrowserCookie,
+  BrowserSession,
+  DEFAULT_USER_AGENT,
+  headerValue,
+  openBrowserRequest
+} from './browser-fetch'
+import { BrowserProxy } from './browser-proxy'
 
 export interface DownloadProgress {
   id: string
@@ -33,6 +42,41 @@ export interface DownloadProgress {
   error?: string
 }
 
+// Netscape cookie file for yt-dlp's --cookies
+function writeCookieFile(id: string, cookies: BrowserCookie[]): string {
+  const lines = cookies.map((cookie) => {
+    const domain = cookie.domain.replace(/^\./, '')
+    return [
+      cookie.hostOnly ? domain : `.${domain}`,
+      cookie.hostOnly ? 'FALSE' : 'TRUE',
+      cookie.path || '/',
+      cookie.secure ? 'TRUE' : 'FALSE',
+      Math.floor(cookie.expirationDate || 0),
+      cookie.name,
+      cookie.value
+    ].join('\t')
+  })
+  const filePath = path.join(os.tmpdir(), `ytdl-cookies-${id}.txt`)
+  fs.writeFileSync(filePath, ['# Netscape HTTP Cookie File', ...lines, ''].join('\n'), {
+    mode: 0o600
+  })
+  return filePath
+}
+
+function isDirectMediaUrl(url: string): boolean {
+  try {
+    return /\.(m3u8|mp4|webm|m4v|mov|mkv)$/i.test(new URL(url).pathname)
+  } catch {
+    return false
+  }
+}
+
+// yt-dlp's in-progress .part/fragment files live here, out of the download folders
+const PARTS_DIR = path.join(os.tmpdir(), 'media-downloader-parts')
+
+const VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v']
+const AUDIO_EXTENSIONS = ['.mp3', '.m4a', '.flac', '.wav', '.ogg', '.opus']
+
 export class Downloader {
   private activeProcesses = new Map<
     string,
@@ -46,13 +90,14 @@ export class Downloader {
   private activeFileDownloads = new Map<
     string,
     {
-      req: http.ClientRequest
+      req: ClientRequest
       filePath: string
       cancelled: boolean
     }
   >()
   private binaryManager: BinaryManager
   private settingsManager: SettingsManager
+  private browserProxy = new BrowserProxy()
 
   constructor(binaryManager: BinaryManager, settingsManager: SettingsManager) {
     this.binaryManager = binaryManager
@@ -66,11 +111,12 @@ export class Downloader {
     resolution: string,
     window: BrowserWindow,
     title?: string,
-    referer?: string
+    referer?: string,
+    session?: BrowserSession
   ): Promise<void> {
     // Direct file downloads (PDFs, archives, images, etc.) bypass yt-dlp entirely
     if (format === 'file') {
-      return this.downloadFile(id, url, window, title, referer)
+      return this.downloadFile(id, url, window, title, referer, session)
     }
 
     // Magnet links and .torrent URLs go through the aria2 torrent engine
@@ -90,10 +136,16 @@ export class Downloader {
       fs.mkdirSync(targetDir, { recursive: true })
     }
 
+    // Stream/file URLs sniffed by the extension are fetched through Chromium with
+    // the browser session, so CDNs that reject non-browser clients still serve them
+    const proxyToken =
+      session && isDirectMediaUrl(url) ? await this.browserProxy.register({ referer, session }) : ''
+    const sourceUrl = proxyToken ? this.browserProxy.proxyUrl(proxyToken, url) : url
+
     const args: string[] = []
 
-    // Add proxy if configured
-    if (proxy && proxy.trim()) {
+    // Add proxy if configured (the browser proxy is loopback-only)
+    if (!proxyToken && proxy && proxy.trim()) {
       args.push('--proxy', proxy.trim())
     }
 
@@ -103,11 +155,23 @@ export class Downloader {
       args.push('--ffmpeg-location', ffmpegDir)
     }
 
-    // Output template: saves file to targetDir
-    args.push('-o', path.join(targetDir, '%(title)s.%(ext)s'))
+    // Output template: finished files land in targetDir, while .part/fragment
+    // files are kept in a temp folder until yt-dlp moves the result over.
+    // Proxied URLs carry no useful title, so use the page title from the extension
+    const safeTitle = title
+      ?.replace(/\.(mp4|mkv|webm|mov|m4v|mp3|m4a)$/i, '')
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .trim()
+    args.push('-P', `home:${targetDir}`, '-P', `temp:${PARTS_DIR}`)
+    args.push('-o', proxyToken && safeTitle ? `${safeTitle}.%(ext)s` : '%(title)s.%(ext)s')
 
     // Print progress in a clean format
     args.push('--newline')
+
+    // Fetch several HLS segments at once through the loopback proxy
+    if (proxyToken) {
+      args.push('--concurrent-fragments', '4')
+    }
 
     // Prevent downloading entire playlists when a video link belongs to a playlist
     if (url.includes('v=') || url.includes('/shorts/') || url.includes('embed/')) {
@@ -137,12 +201,27 @@ export class Downloader {
     }
 
     // Add referer if provided
+    // HLS CDNs behind embed players often check Origin as well as Referer
     if (referer) {
       args.push('--referer', referer)
+      try {
+        args.push('--add-header', `Origin:${new URL(referer).origin}`)
+      } catch {
+        // Malformed referer — send it without an Origin header
+      }
+    }
+
+    let cookieFile = ''
+    if (!proxyToken && session?.cookies?.length) {
+      cookieFile = writeCookieFile(id, session.cookies)
+      args.push('--cookies', cookieFile)
+    }
+    if (session?.userAgent) {
+      args.push('--user-agent', session.userAgent)
     }
 
     // Add the target URL
-    args.push(url)
+    args.push(sourceUrl)
 
     // Initial status
     const initialItem: HistoryItem = {
@@ -228,15 +307,17 @@ export class Downloader {
 
         // Parsing download progress
         // e.g. [download]   3.2% of   14.28MiB at    1.12MiB/s ETA 00:09
+        // HLS estimates are padded after the tilde and may report unknown speed:
+        // e.g. [download]   3.0% of ~   1.00GiB at  Unknown B/s ETA Unknown (frag 8/250)
         if (line.includes('[download]') && line.includes('%')) {
           const progressMatch = line.match(
-            /\[download\]\s+([\d.]+)%\s+of\s+([^\s]+)\s+at\s+([^\s]+)\s+ETA\s+([^\s]+)/
+            /\[download\]\s+([\d.]+)%\s+of\s+(~?)\s*(\S+)\s+at\s+(.+?)\s+ETA\s+(\S+)/
           )
           if (progressMatch) {
             const percent = parseFloat(progressMatch[1])
-            const totalSize = progressMatch[2]
-            const speed = progressMatch[3]
-            const eta = progressMatch[4]
+            const totalSize = `${progressMatch[2]}${progressMatch[3]}`
+            const speed = progressMatch[4].trim()
+            const eta = progressMatch[5]
 
             this.sendProgress(window, {
               id,
@@ -287,17 +368,30 @@ export class Downloader {
         if (alreadyMatch && alreadyMatch[1]) {
           finalFilePath = alreadyMatch[1].trim()
         }
+
+        // Finished files are moved from the temp parts folder into targetDir
+        // e.g. [MoveFiles] Moving file "C:\Temp\title.mp4" to "C:\Videos\title.mp4"
+        const moveMatch = line.match(/\[MoveFiles\] Moving file "(.+)" to "(.+)"/)
+        if (moveMatch && moveMatch[2]) {
+          finalFilePath = moveMatch[2].trim()
+        }
       }
     })
 
+    let lastError = ''
     proc.stderr.on('data', (data) => {
-      console.error(`[yt-dlp stderr]: ${data.toString()}`)
+      const text = data.toString()
+      console.error(`[yt-dlp stderr]: ${text}`)
+      const errorLine = text.match(/ERROR:\s*(.+)/)
+      if (errorLine) lastError = errorLine[1].trim()
     })
 
     proc.on('close', (code) => {
       const wasCancelled = !this.activeProcesses.has(id)
       this.activeProcesses.delete(id)
       console.log(`Process for ${id} exited with code ${code}, wasCancelled: ${wasCancelled}`)
+      if (cookieFile) fs.rm(cookieFile, { force: true }, () => {})
+      if (proxyToken) this.browserProxy.unregister(proxyToken)
 
       if (code === 0) {
         // Success
@@ -305,7 +399,8 @@ export class Downloader {
         setTimeout(() => {
           // Prefer the final path captured from the Merger/ExtractAudio step;
           // fall back to deriving it from the per-stream Destination line.
-          let finalPath = finalFilePath
+          // A Merger path may still point at the temp parts folder
+          let finalPath = finalFilePath ? path.join(targetDir, path.basename(finalFilePath)) : ''
           if (!finalPath) {
             let derivedName = parsedFileName
             if (format === 'mp3') {
@@ -359,7 +454,8 @@ export class Downloader {
               percent: 0,
               speed: 'Failed',
               eta: '--:--',
-              status: 'failed'
+              status: 'failed',
+              error: lastError || undefined
             })
           }
         }
@@ -593,16 +689,23 @@ export class Downloader {
     url: string,
     window: BrowserWindow,
     title?: string,
-    referer?: string
+    referer?: string,
+    session?: BrowserSession
   ): Promise<void> {
     const settings = this.settingsManager.getSettings()
-    const targetDir = settings.downloadDirFiles || path.join(settings.downloadDir, 'Files')
+    const initialName = title || this.fileNameFromUrl(url) || 'Direct file'
+    // Media handed off from the browser lands in the video/music folders
+    const ext = path.extname(initialName).toLowerCase()
+    const targetDir = VIDEO_EXTENSIONS.includes(ext)
+      ? settings.downloadDirVideo
+      : AUDIO_EXTENSIONS.includes(ext)
+        ? settings.downloadDirMusic
+        : settings.downloadDirFiles || path.join(settings.downloadDir, 'Files')
 
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true })
     }
 
-    const initialName = title || this.fileNameFromUrl(url) || 'Direct file'
     this.settingsManager.addHistoryItem({
       id,
       url,
@@ -641,140 +744,150 @@ export class Downloader {
           percent: 0,
           speed: 'Failed',
           eta: '--:--',
-          status: 'failed'
+          status: 'failed',
+          error: message
         })
         resolve()
       }
 
-      const request = (currentUrl: string, redirectsLeft: number): void => {
-        let parsed: URL
+      const start = async (): Promise<void> => {
+        let req: ClientRequest
         try {
-          parsed = new URL(currentUrl)
+          new URL(url)
+          req = await openBrowserRequest(url, referer, session)
         } catch {
           fail('Invalid URL')
           return
         }
 
-        const lib = parsed.protocol === 'http:' ? http : https
-        const req = lib.get(
-          parsed,
-          {
-            headers: {
-              'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-              ...(referer ? { Referer: referer } : {})
-            }
-          },
-          (res) => {
-            const status = res.statusCode || 0
+        let currentUrl = url
+        let redirectsLeft = 10
+        let idleTimer: NodeJS.Timeout | undefined
+        const resetIdle = (): void => {
+          clearTimeout(idleTimer)
+          idleTimer = setTimeout(() => {
+            req.abort()
+            fail('Connection timed out')
+          }, 30000)
+        }
 
-            if (status >= 300 && status < 400 && res.headers.location) {
-              res.resume()
-              if (redirectsLeft <= 0) {
-                fail('Too many redirects')
-                return
-              }
-              request(new URL(res.headers.location, currentUrl).toString(), redirectsLeft - 1)
-              return
-            }
+        req.on('redirect', (_status, _method, redirectUrl) => {
+          if (redirectsLeft-- <= 0) {
+            clearTimeout(idleTimer)
+            req.abort()
+            fail('Too many redirects')
+            return
+          }
+          currentUrl = redirectUrl
+          req.followRedirect()
+        })
 
-            if (status < 200 || status >= 300) {
-              res.resume()
-              fail(`Server responded with status ${status}`)
-              return
-            }
+        req.on('response', (res) => {
+          const status = res.statusCode || 0
 
-            const fileName = this.resolveFileName(
-              res.headers['content-disposition'],
-              currentUrl,
-              title
-            )
-            const filePath = this.uniquePath(targetDir, fileName)
-            const totalBytes = parseInt(res.headers['content-length'] || '', 10) || 0
+          if (status < 200 || status >= 300) {
+            clearTimeout(idleTimer)
+            req.abort()
+            fail(`Server responded with status ${status}`)
+            return
+          }
 
-            const entry = this.activeFileDownloads.get(id)
-            if (entry) {
-              entry.req = req
-              entry.filePath = filePath
-            }
+          const fileName = this.resolveFileName(
+            headerValue(res, 'content-disposition') || undefined,
+            currentUrl,
+            title
+          )
+          const filePath = this.uniquePath(targetDir, fileName)
+          const totalBytes = parseInt(headerValue(res, 'content-length'), 10) || 0
 
-            this.settingsManager.updateHistoryItemStatus(id, 'downloading', {
-              title: path.basename(filePath, path.extname(filePath)) || fileName,
-              fileName: path.basename(filePath),
-              filePath,
-              ...(totalBytes > 0 ? { fileSize: this.formatBytes(totalBytes) } : {})
-            })
+          const entry = this.activeFileDownloads.get(id)
+          if (entry) {
+            entry.filePath = filePath
+          }
 
-            const out = fs.createWriteStream(filePath)
-            let received = 0
-            let lastSent = 0
-            let lastBytes = 0
-            let lastTime = Date.now()
+          this.settingsManager.updateHistoryItemStatus(id, 'downloading', {
+            title: path.basename(filePath, path.extname(filePath)) || fileName,
+            fileName: path.basename(filePath),
+            filePath,
+            ...(totalBytes > 0 ? { fileSize: this.formatBytes(totalBytes) } : {})
+          })
 
-            res.on('data', (chunk: Buffer) => {
-              received += chunk.length
-              const now = Date.now()
-              if (now - lastSent >= 250) {
-                const speedBps = ((received - lastBytes) / Math.max(now - lastTime, 1)) * 1000
-                this.sendProgress(window, {
-                  id,
-                  percent: totalBytes > 0 ? (received / totalBytes) * 100 : 0,
-                  speed: `${this.formatBytes(speedBps)}/s`,
-                  eta:
-                    totalBytes > 0 && speedBps > 0
-                      ? this.formatEta((totalBytes - received) / speedBps)
-                      : '--:--',
-                  status: 'downloading',
-                  fileName: path.basename(filePath),
-                  fileSize: totalBytes > 0 ? this.formatBytes(totalBytes) : undefined
-                })
-                lastSent = now
-                lastBytes = received
-                lastTime = now
-              }
-            })
+          const out = fs.createWriteStream(filePath)
+          let received = 0
+          let lastSent = 0
+          let lastBytes = 0
+          let lastTime = Date.now()
 
-            res.pipe(out)
-
-            out.on('finish', () => {
-              const finished = this.activeFileDownloads.get(id)
-              if (finished?.cancelled) {
-                resolve()
-                return
-              }
-              this.activeFileDownloads.delete(id)
-              this.settingsManager.updateHistoryItemStatus(id, 'completed', {
-                status: 'completed',
-                fileSize: this.formatBytes(received)
-              })
+          res.on('data', (chunk: Buffer) => {
+            resetIdle()
+            received += chunk.length
+            out.write(chunk)
+            const now = Date.now()
+            if (now - lastSent >= 250) {
+              const speedBps = ((received - lastBytes) / Math.max(now - lastTime, 1)) * 1000
               this.sendProgress(window, {
                 id,
-                percent: 100,
-                speed: 'Done',
-                eta: '00:00',
-                status: 'completed',
-                fileName: path.basename(filePath)
+                percent: totalBytes > 0 ? (received / totalBytes) * 100 : 0,
+                speed: `${this.formatBytes(speedBps)}/s`,
+                eta:
+                  totalBytes > 0 && speedBps > 0
+                    ? this.formatEta((totalBytes - received) / speedBps)
+                    : '--:--',
+                status: 'downloading',
+                fileName: path.basename(filePath),
+                fileSize: totalBytes > 0 ? this.formatBytes(totalBytes) : undefined
               })
+              lastSent = now
+              lastBytes = received
+              lastTime = now
+            }
+          })
+
+          res.on('end', () => {
+            clearTimeout(idleTimer)
+            out.end()
+          })
+
+          out.on('finish', () => {
+            const finished = this.activeFileDownloads.get(id)
+            if (finished?.cancelled) {
               resolve()
+              return
+            }
+            this.activeFileDownloads.delete(id)
+            this.settingsManager.updateHistoryItemStatus(id, 'completed', {
+              status: 'completed',
+              fileSize: this.formatBytes(received)
             })
+            this.sendProgress(window, {
+              id,
+              percent: 100,
+              speed: 'Done',
+              eta: '00:00',
+              status: 'completed',
+              fileName: path.basename(filePath)
+            })
+            resolve()
+          })
 
-            res.on('error', (err) => {
-              out.destroy()
-              this.cleanupPartialFile(filePath)
-              fail(err.message)
-            })
-            out.on('error', (err) => {
-              req.destroy()
-              this.cleanupPartialFile(filePath)
-              fail(err.message)
-            })
+          const onStreamError = (message: string): void => {
+            clearTimeout(idleTimer)
+            out.destroy()
+            this.cleanupPartialFile(filePath)
+            fail(message)
           }
-        )
-
-        req.setTimeout(30000, () => {
-          req.destroy(new Error('Connection timed out'))
+          res.on('error', (err: Error) => onStreamError(err.message))
+          res.on('aborted', () => onStreamError('Download aborted'))
+          out.on('error', (err) => {
+            req.abort()
+            onStreamError(err.message)
+          })
         })
-        req.on('error', (err) => fail(err.message))
+
+        req.on('error', (err) => {
+          clearTimeout(idleTimer)
+          fail(err.message)
+        })
 
         const entry = this.activeFileDownloads.get(id)
         if (entry) {
@@ -782,9 +895,12 @@ export class Downloader {
         } else {
           this.activeFileDownloads.set(id, { req, filePath: '', cancelled: false })
         }
+
+        resetIdle()
+        req.end()
       }
 
-      request(url, 5)
+      start()
     })
   }
 
@@ -871,6 +987,45 @@ export class Downloader {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
   }
 
+  // Checks whether the app itself can fetch a direct file (not just the browser
+  // that passed a site's checks). Resolves the final HTTP status, 0 on error.
+  async probeFile(url: string, referer?: string, session?: BrowserSession): Promise<number> {
+    let req: ClientRequest
+    try {
+      new URL(url)
+      req = await openBrowserRequest(url, referer, session, { Range: 'bytes=0-0' })
+    } catch {
+      return 0
+    }
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        req.abort()
+        resolve(0)
+      }, 10000)
+      let redirectsLeft = 10
+      req.on('redirect', () => {
+        if (redirectsLeft-- <= 0) {
+          clearTimeout(timer)
+          req.abort()
+          resolve(0)
+          return
+        }
+        req.followRedirect()
+      })
+      req.on('response', (res) => {
+        clearTimeout(timer)
+        req.abort()
+        resolve(res.statusCode || 0)
+      })
+      req.on('error', () => {
+        clearTimeout(timer)
+        resolve(0)
+      })
+      req.end()
+    })
+  }
+
   // HEAD request to read Content-Length for direct file links
   private getRemoteFileSize(url: string): Promise<string> {
     return new Promise((resolve) => {
@@ -889,8 +1044,7 @@ export class Downloader {
           {
             method: 'HEAD',
             headers: {
-              'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+              'User-Agent': DEFAULT_USER_AGENT
             }
           },
           (res) => {
@@ -1126,7 +1280,7 @@ export class Downloader {
     const fileInfo = this.activeFileDownloads.get(id)
     if (fileInfo) {
       fileInfo.cancelled = true
-      fileInfo.req.destroy()
+      fileInfo.req.abort()
       setTimeout(() => {
         this.activeFileDownloads.delete(id)
         this.cleanupPartialFile(fileInfo.filePath)
@@ -1167,6 +1321,14 @@ export class Downloader {
               if (fs.existsSync(extraPath)) {
                 fs.unlinkSync(extraPath)
                 console.log(`Deleted cancelled download ${suffix} file: ${extraPath}`)
+              }
+            }
+            // HLS fragments: title.mp4.part-Frag12 etc.
+            const fragPrefix = `${path.basename(filePath)}.part-Frag`
+            const dir = path.dirname(filePath)
+            if (fs.existsSync(dir)) {
+              for (const entry of fs.readdirSync(dir)) {
+                if (entry.startsWith(fragPrefix)) fs.rmSync(path.join(dir, entry), { force: true })
               }
             }
           } catch (err: any) {

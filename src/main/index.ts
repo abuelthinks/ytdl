@@ -8,6 +8,13 @@ import { SettingsManager } from './settings'
 import { Downloader } from './downloader'
 import { LocalServer } from './server'
 
+// Installed builds before the MyIDM rename kept settings, history and binaries
+// under the old product name — keep using that folder so nothing is lost
+const legacyUserData = join(app.getPath('appData'), 'Media Downloader')
+if (app.isPackaged && fs.existsSync(legacyUserData)) {
+  app.setPath('userData', legacyUserData)
+}
+
 let mainWindow: BrowserWindow | null = null
 let preDockBounds: Electron.Rectangle | null = null
 const DOCK_WIDTH = 380

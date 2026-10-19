@@ -1,4 +1,4 @@
-# Media Downloader
+# MyIDM
 
 A cross-platform desktop app for downloading videos and audio from the web, built on
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) and ffmpeg. Electron + React + TypeScript.
